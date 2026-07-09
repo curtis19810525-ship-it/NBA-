@@ -1,0 +1,138 @@
+﻿"""
+還原 Excel 檔案從備份
+"""
+
+import os
+import shutil
+from datetime import datetime
+
+# 嘗試導入 openpyxl 用於格式轉換
+try:
+    from openpyxl import load_workbook
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+    print("⚠ 警告：未安裝 openpyxl，無法進行格式轉換")
+
+# 本專案目錄（抓取MLB網路資料）下的備份資料夾
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKUP_FOLDER = os.path.join(_SCRIPT_DIR, "..", "回朔點備分")
+
+# 目標檔案路徑（與 config.py 一致）
+try:
+    from config import MLB_XLSX_FILE as TARGET_FILE
+except ImportError:
+    TARGET_FILE = r"C:\Users\curti\OneDrive\MLB26\MLB26-27數據.xlsx"
+
+# 備份檔案路徑（如果目標檔案是 .xlsx，但備份是 .xlsm）
+BACKUP_FILE_XLSM = None  # 會自動尋找最新的備份
+
+def find_latest_backup():
+    """尋找最新的備份檔案"""
+    if not os.path.exists(BACKUP_FOLDER):
+        print(f"✗ 備份資料夾不存在：{BACKUP_FOLDER}")
+        return None
+    
+    # 尋找所有備份檔案
+    backup_files = []
+    for filename in os.listdir(BACKUP_FOLDER):
+        if filename.startswith("MLB") and (filename.endswith(".xlsx") or filename.endswith(".xlsm")):
+            filepath = os.path.join(BACKUP_FOLDER, filename)
+            backup_files.append((filepath, os.path.getmtime(filepath)))
+    
+    if not backup_files:
+        print(f"✗ 找不到備份檔案")
+        return None
+    
+    # 排序並取得最新的
+    backup_files.sort(key=lambda x: x[1], reverse=True)
+    latest_backup = backup_files[0][0]
+    
+    print(f"✓ 找到最新備份：{os.path.basename(latest_backup)}")
+    print(f"  備份時間：{datetime.fromtimestamp(backup_files[0][1]).strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    return latest_backup
+
+def restore_file():
+    """還原檔案"""
+    print("=" * 60)
+    print("還原 Excel 檔案")
+    print("=" * 60)
+    
+    # 尋找最新備份
+    backup_file = find_latest_backup()
+    if not backup_file:
+        return False
+    
+    # 檢查目標檔案是否存在
+    if os.path.exists(TARGET_FILE):
+        # 備份現有的損壞檔案
+        base = os.path.splitext(os.path.basename(TARGET_FILE))[0]
+        backup_name = f"{base}_損壞備份_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        backup_path = os.path.join(os.path.dirname(TARGET_FILE), backup_name)
+        try:
+            shutil.copy2(TARGET_FILE, backup_path)
+            print(f"✓ 已備份損壞的檔案：{backup_name}")
+        except Exception as e:
+            print(f"⚠ 無法備份損壞的檔案：{e}")
+            print(f"  繼續還原...")
+    
+    # 還原檔案
+    try:
+        # 如果備份是 .xlsm，目標是 .xlsx，需要正確轉換格式
+        if backup_file.endswith('.xlsm') and TARGET_FILE.endswith('.xlsx'):
+            if OPENPYXL_AVAILABLE:
+                # 使用 openpyxl 正確轉換格式
+                print(f"正在轉換 .xlsm 為 .xlsx 格式...")
+                wb = load_workbook(backup_file, keep_vba=False)  # 不保留 VBA 巨集
+                
+                # 如果目標檔案存在，先刪除
+                if os.path.exists(TARGET_FILE):
+                    os.remove(TARGET_FILE)
+                
+                # 儲存為 .xlsx 格式
+                wb.save(TARGET_FILE)
+                wb.close()
+                print(f"✓ 已從 .xlsm 備份轉換為 .xlsx 檔案")
+            else:
+                # 如果沒有 openpyxl，嘗試直接複製並重新命名（可能會有問題）
+                print(f"⚠ 警告：無法進行格式轉換，嘗試直接複製...")
+                temp_file = TARGET_FILE.replace('.xlsx', '_temp.xlsx')
+                shutil.copy2(backup_file, temp_file)
+                
+                # 如果目標檔案存在，先刪除
+                if os.path.exists(TARGET_FILE):
+                    os.remove(TARGET_FILE)
+                
+                # 重新命名
+                os.rename(temp_file, TARGET_FILE)
+                print(f"⚠ 已複製檔案，但格式可能不正確，建議手動在 Excel 中另存為 .xlsx")
+        else:
+            # 直接複製（格式相同）
+            shutil.copy2(backup_file, TARGET_FILE)
+            print(f"✓ 已還原檔案")
+        
+        print(f"\n✓ 還原成功！")
+        print(f"  目標檔案：{TARGET_FILE}")
+        print(f"  來源備份：{os.path.basename(backup_file)}")
+        return True
+        
+    except Exception as e:
+        print(f"✗ 還原失敗：{e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+if __name__ == "__main__":
+    if restore_file():
+        print("\n" + "=" * 60)
+        print("✓ 還原完成！")
+        print("=" * 60)
+        print("\n建議：")
+        print("1. 在 Excel 中開啟檔案，確認資料是否完整")
+        print("2. 檢查「每日數據」、「正負盤」、「各隊正負」三個分頁是否存在")
+        print("3. 確認無誤後，再執行爬蟲程式")
+    else:
+        print("\n" + "=" * 60)
+        print("✗ 還原失敗！")
+        print("=" * 60)

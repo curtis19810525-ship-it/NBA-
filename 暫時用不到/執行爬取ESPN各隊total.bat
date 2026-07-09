@@ -1,0 +1,16 @@
+@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+
+echo ============================================================
+echo 爬取 ESPN MLB 各隊 Total
+echo ============================================================
+echo.
+echo 將寫入：各隊total 分頁（清空第2列起後重寫）
+echo.
+
+python "%~dp0espn_team_total.py"
+
+echo.
+pause
+

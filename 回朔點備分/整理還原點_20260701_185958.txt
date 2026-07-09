@@ -1,0 +1,47 @@
+﻿整理還原點 20260701_185958
+動作：將 PY檔/ 內兩 bat 所需 .py 移回根目錄，其餘移入 暫時用不到/
+
+整理前根目錄：
+NBA預測資料
+PY檔
+__pycache__
+回朔點備分
+暫時用不到
+fill_observation.py.bak_20260625_203027
+fill_observation.py.bak_20260630_062715
+requirements.txt
+填入盤口觀察.bat
+手動還原說明.txt
+爬蟲正負各隊.bat
+
+整理前 PY檔：
+analysis_helpers.py
+build_analysis_workbook.py
+config.py
+convert_daily_data_format.py
+espn_player_stats.py
+espn_team_total.py
+fill_observation.py
+mlb_lineups.py
+nba_lineups.py
+run_all.py
+使用Selenium完整版.py
+修正分數位置.py
+執行範圍爬蟲.py
+批次轉換各隊正負.py
+批次轉換正負盤.py
+排序每日數據.py
+更新姓名對照表.py
+每日數據舊格式轉新格式.py
+每日數據轉各隊正負.py
+每日數據轉正負盤.py
+測試直接抓取.py
+爬取ESPN各隊Total.py
+爬取ESPN球員狀態.py
+爬取Rotowire先發名單.py
+爬取今日先發名單.py
+還原Excel檔案.py
+
+移回根目錄: run_all.py, config.py, fill_observation.py, analysis_helpers.py, 執行範圍爬蟲.py, 使用Selenium完整版.py, 批次轉換正負盤.py, 每日數據轉正負盤.py, 批次轉換各隊正負.py, 每日數據轉各隊正負.py, espn_player_stats.py, 爬取ESPN球員狀態.py, espn_team_total.py, 爬取ESPN各隊Total.py, mlb_lineups.py, 爬取Rotowire先發名單.py, 更新姓名對照表.py
+移入暫時用不到: build_analysis_workbook.py, 還原Excel檔案.py, 排序每日數據.py, 每日數據舊格式轉新格式.py, convert_daily_data_format.py, 修正分數位置.py, 爬取今日先發名單.py, nba_lineups.py, 測試直接抓取.py
+略過/已在根目錄: 

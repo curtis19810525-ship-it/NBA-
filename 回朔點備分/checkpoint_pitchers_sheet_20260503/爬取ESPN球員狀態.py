@@ -1,0 +1,419 @@
+"""
+爬取 ESPN MLB 球員打擊數據，寫入「球員狀態」分頁。
+- 資料來源：ESPN MLB team stats（All Splits + Expanded）
+- 每次執行：覆蓋「球員狀態」分頁（不保留歷史快照）
+"""
+
+import os
+import re
+import sys
+import time
+from datetime import datetime
+import requests
+from bs4 import BeautifulSoup
+from openpyxl import load_workbook
+
+try:
+    from config import NBA_STATS_FILE
+except ImportError:
+    NBA_STATS_FILE = r"C:\Users\curti\OneDrive\MLB26\MLB26-27數據.xlsx"
+
+USER_AGENTS = [
+    # 目前這組在部分時段會拿到 202 + 空內容，保留做 fallback
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    # 較穩定備援
+    "Mozilla/5.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+]
+
+# 固定隊伍順序（與 MLB 30 隊中文定稿一致）
+MLB_TEAMS = [
+    ("金鶯", "bal", "baltimore-orioles"),
+    ("紅襪", "bos", "boston-red-sox"),
+    ("洋基", "nyy", "new-york-yankees"),
+    ("光芒", "tb", "tampa-bay-rays"),
+    ("藍鳥", "tor", "toronto-blue-jays"),
+    ("白襪", "chw", "chicago-white-sox"),
+    ("守護者", "cle", "cleveland-guardians"),
+    ("老虎", "det", "detroit-tigers"),
+    ("皇家", "kc", "kansas-city-royals"),
+    ("雙城", "min", "minnesota-twins"),
+    ("太空人", "hou", "houston-astros"),
+    ("天使", "laa", "los-angeles-angels"),
+    ("運動家", "ath", "athletics"),
+    ("水手", "sea", "seattle-mariners"),
+    ("遊騎兵", "tex", "texas-rangers"),
+    ("勇士", "atl", "atlanta-braves"),
+    ("馬林魚", "mia", "miami-marlins"),
+    ("大都會", "nym", "new-york-mets"),
+    ("費城人", "phi", "philadelphia-phillies"),
+    ("國民", "wsh", "washington-nationals"),
+    ("小熊", "chc", "chicago-cubs"),
+    ("紅人", "cin", "cincinnati-reds"),
+    ("釀酒人", "mil", "milwaukee-brewers"),
+    ("海盜", "pit", "pittsburgh-pirates"),
+    ("紅雀", "stl", "st-louis-cardinals"),
+    ("響尾蛇", "ari", "arizona-diamondbacks"),
+    ("落磯", "col", "colorado-rockies"),
+    ("道奇", "lad", "los-angeles-dodgers"),
+    ("教士", "sd", "san-diego-padres"),
+    ("巨人", "sf", "san-francisco-giants"),
+]
+
+TARGET_HEADERS = [
+    "球隊", "球員", "位置", "GP/出賽", "AB/打數", "R/得分", "H/安打", "2B/二壘打", "3B/三壘打",
+    "HR/全壘打", "RBI/打點", "TB/壘打數", "BB/保送", "SO/三振", "SB/盜壘", "AVG/打擊率",
+    "OBP/上壘率", "SLG/長打率", "OPS/整體攻擊指數", "WAR/勝場貢獻值", "RC/得分創造",
+    "RC/27/每27出局得分創造", "BB/PA/保送率", "BB/K/保送三振比", "ISOP/純長打率",
+    "SECA/次級攻擊指數", "P/PA/每打席用球數", "XBH/長打數", "PA/打席", "AB/HR/全壘打打數比",
+]
+
+INJURY_HEADERS = ["球隊", "球員", "位置", "傷勢", "狀態", "更新日期"]
+
+STATUS_MAP_ZH = {
+    "OUT": "缺陣",
+    "DAY-TO-DAY": "每日觀察",
+    "DAY TO DAY": "每日觀察",
+    "DTD": "每日觀察",
+    "QUESTIONABLE": "出賽存疑",
+    "PROBABLE": "可能出賽",
+    "DOUBTFUL": "出賽存疑",
+}
+
+
+def _normalize_header(h):
+    return re.sub(r"\s+", "", str(h).strip().upper())
+
+
+def _cell_text(cell):
+    return re.sub(r"\s+", " ", cell.get_text(" ", strip=True)).strip()
+
+
+def _t(cell):
+    return _cell_text(cell)
+
+
+def _fetch_espn_html(url, team_cn):
+    """
+    ESPN 在某些 UA 會回 202 且 body 為空；這裡做 UA fallback 與重試。
+    """
+    last_err = None
+    for ua in USER_AGENTS:
+        headers = {"User-Agent": ua}
+        for _ in range(2):
+            try:
+                r = requests.get(url, headers=headers, timeout=30)
+                # 202 或空內容視為無效回應，交給下一輪 UA
+                if r.status_code == 202 or not (r.text or "").strip():
+                    last_err = RuntimeError(f"HTTP {r.status_code} / empty body")
+                    time.sleep(0.2)
+                    continue
+                r.raise_for_status()
+                return r.text
+            except Exception as e:
+                last_err = e
+                time.sleep(0.2)
+                continue
+    raise RuntimeError(f"ESPN 回應異常（{team_cn}）：{last_err}")
+
+
+def _clean_player_and_pos(name_text):
+    text = re.sub(r"[\*\u2020]+", "", str(name_text or "")).strip()
+    # 支援 SS/LF/RF 以及 1B/2B/3B、DH 等位置寫法
+    m = re.match(r"^(.*?)(?:\s+([A-Z0-9]{1,3}(?:/[A-Z0-9]{1,3})*))?$", text)
+    if not m:
+        return text, ""
+    name = (m.group(1) or "").strip()
+    pos = (m.group(2) or "").strip()
+    if not name:
+        return text, ""
+    return name, pos
+
+
+def _status_to_zh(status_en):
+    s = (status_en or "").strip()
+    key = s.upper()
+    if key in STATUS_MAP_ZH:
+        return STATUS_MAP_ZH[key]
+    m = re.search(r"(\d+)-DAY\s+IL", key)
+    if m:
+        return f"傷兵名單({m.group(1)}天)"
+    if key.endswith("IL"):
+        return "傷兵名單"
+    return s
+
+
+def _table_headers(table):
+    tr = table.find("tr")
+    if not tr:
+        return []
+    return [_normalize_header(_cell_text(c)) for c in tr.find_all(["th", "td"])]
+
+
+def _extract_rows_with_headers(table):
+    rows = []
+    headers = _table_headers(table)
+    if not headers:
+        return rows
+    for tr in table.find_all("tr")[1:]:
+        cells = tr.find_all(["td", "th"])
+        if not cells:
+            continue
+        vals = [_cell_text(c) for c in cells]
+        if not any(vals):
+            continue
+        if len(vals) < len(headers):
+            vals += [""] * (len(headers) - len(vals))
+        if len(vals) > len(headers):
+            vals = vals[:len(headers)]
+        rows.append(dict(zip(headers, vals)))
+    return rows
+
+
+def _pair_name_and_stats(name_rows, stat_rows):
+    out = []
+    n = min(len(name_rows), len(stat_rows))
+    for i in range(n):
+        raw_name = (name_rows[i].get("NAME", "") or "").strip()
+        if not raw_name:
+            continue
+        player, pos = _clean_player_and_pos(raw_name)
+        if not player or player.upper() in {"TOTAL", "NAME"}:
+            continue
+        row = dict(stat_rows[i])
+        row["NAME"] = player
+        row["POS"] = pos
+        out.append(row)
+    return out
+
+
+def _find_batting_tables(soup):
+    basic_rows = []
+    expanded_rows = []
+
+    basic_stats_need = {"GP", "AB", "R", "H", "2B", "3B", "HR", "RBI", "TB", "BB", "SO", "SB", "AVG", "OBP", "SLG", "OPS", "WAR"}
+    expanded_stats_need = {"GP", "AB", "RC", "RC/27", "BB/PA", "BB/K", "ISOP", "SECA", "P/PA", "XBH", "PA", "AB/HR"}
+
+    tables = soup.find_all("table")
+    headers_list = [_table_headers(tb) for tb in tables]
+
+    for i in range(len(tables) - 1):
+        h1 = headers_list[i]
+        h2 = headers_list[i + 1]
+        if h1 == ["NAME"] and basic_stats_need.issubset(set(h2)) and not basic_rows:
+            name_rows = _extract_rows_with_headers(tables[i])
+            stat_rows = _extract_rows_with_headers(tables[i + 1])
+            basic_rows = _pair_name_and_stats(name_rows, stat_rows)
+        if h1 == ["NAME"] and expanded_stats_need.issubset(set(h2)) and not expanded_rows:
+            name_rows = _extract_rows_with_headers(tables[i])
+            stat_rows = _extract_rows_with_headers(tables[i + 1])
+            expanded_rows = _pair_name_and_stats(name_rows, stat_rows)
+
+    return basic_rows, expanded_rows
+
+
+def fetch_team_rows(team_cn, abbr, slug):
+    url = f"https://www.espn.com/mlb/team/stats/_/name/{abbr}/{slug}"
+    try:
+        html = _fetch_espn_html(url, team_cn)
+    except Exception as e:
+        print(f"  抓取失敗 {team_cn}: {e}")
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    basic_rows, expanded_rows = _find_batting_tables(soup)
+    if not basic_rows:
+        print(f"  未找到基本打擊表：{team_cn}")
+        return []
+
+    expanded_by_name = {}
+    for row in expanded_rows:
+        p_name, _ = _clean_player_and_pos(row.get("NAME", ""))
+        if p_name:
+            expanded_by_name[p_name] = row
+
+    out = []
+    for row in basic_rows:
+        # basic_rows 已在 _pair_name_and_stats 內完成名稱/位置拆分，這裡直接使用
+        player = (row.get("NAME", "") or "").strip()
+        pos = (row.get("POS", "") or "").strip()
+        ex = expanded_by_name.get(player, {})
+        out.append([
+            team_cn,
+            player,
+            pos,
+            row.get("GP", ""),
+            row.get("AB", ""),
+            row.get("R", ""),
+            row.get("H", ""),
+            row.get("2B", ""),
+            row.get("3B", ""),
+            row.get("HR", ""),
+            row.get("RBI", ""),
+            row.get("TB", ""),
+            row.get("BB", ""),
+            row.get("SO", ""),
+            row.get("SB", ""),
+            row.get("AVG", ""),
+            row.get("OBP", ""),
+            row.get("SLG", ""),
+            row.get("OPS", ""),
+            row.get("WAR", ""),
+            ex.get("RC", ""),
+            ex.get("RC/27", ""),
+            ex.get("BB/PA", ""),
+            ex.get("BB/K", ""),
+            ex.get("ISOP", ""),
+            ex.get("SECA", ""),
+            ex.get("P/PA", ""),
+            ex.get("XBH", ""),
+            ex.get("PA", ""),
+            ex.get("AB/HR", ""),
+        ])
+    return out
+
+
+def _extract_pos_from_player(player_name):
+    name, pos = _clean_player_and_pos(player_name)
+    return name, pos
+
+
+def fetch_team_injuries(team_cn, abbr, slug):
+    url = f"https://www.espn.com/mlb/team/injuries/_/name/{abbr}/{slug}"
+    try:
+        html = _fetch_espn_html(url, team_cn)
+    except Exception as e:
+        print(f"  傷兵抓取失敗 {team_cn}: {e}")
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    rows = []
+    update_date = datetime.now().strftime("%Y-%m-%d")
+
+    # ESPN MLB 傷兵頁常見格式："{球員} {位置} Status {英文狀態} {說明...}"
+    for a in soup.find_all("a", href=re.compile(r"/mlb/player/_/id/")):
+        txt = _t(a)
+        if not txt:
+            continue
+        # 優先解析 "姓名 位置 Status 狀態 說明"
+        m = re.match(r"^(.*?)\s+([A-Z0-9/]{1,3})\s+Status\s+(.+?)\s+(.*)$", txt, re.I)
+        if m:
+            player = m.group(1).strip()
+            pos = m.group(2).strip()
+            status_en = m.group(3).strip()
+            injury = m.group(4).strip()
+            # ESPN 常見 "Status 10-day il xxx"；把 il 納入狀態並從傷勢移除
+            if re.match(r"^\d+-day$", status_en, re.I) and injury.lower().startswith("il "):
+                status_en = f"{status_en} il"
+                injury = injury[3:].strip()
+        else:
+            # 退而求其次：以 Status 分段
+            before, sep, after = txt.partition(" Status ")
+            player, pos = _extract_pos_from_player(before)
+            status_en = ""
+            injury = after.strip() if sep else ""
+            # 若仍能辨識常見狀態詞，抽出狀態
+            m2 = re.match(r"^(Out|Day-to-day|Day To Day|DTD|Questionable|Probable|Doubtful|\d+-day il|60-day il)\s*(.*)$", injury, re.I)
+            if m2:
+                status_en = m2.group(1).strip()
+                injury = m2.group(2).strip()
+        if not player:
+            continue
+        rows.append([team_cn, player, pos, injury, _status_to_zh(status_en), update_date])
+
+    return rows
+
+
+def write_sheet(all_rows):
+    if not os.path.exists(NBA_STATS_FILE):
+        raise FileNotFoundError(f"Excel 檔案不存在：{NBA_STATS_FILE}")
+
+    wb = load_workbook(NBA_STATS_FILE)
+    if "球員狀態" not in wb.sheetnames:
+        wb.create_sheet("球員狀態")
+    ws = wb["球員狀態"]
+
+    # 寫入固定表頭 A1~AD1
+    for idx, title in enumerate(TARGET_HEADERS, start=1):
+        ws.cell(row=1, column=idx, value=title)
+
+    # 覆蓋模式：清空第2列起既有資料
+    if ws.max_row >= 2:
+        ws.delete_rows(2, ws.max_row - 1)
+
+    for r_idx, row in enumerate(all_rows, start=2):
+        for c_idx, val in enumerate(row, start=1):
+            ws.cell(row=r_idx, column=c_idx, value=val)
+
+    wb.save(NBA_STATS_FILE)
+    wb.close()
+
+
+def write_injury_sheet(all_rows):
+    if not os.path.exists(NBA_STATS_FILE):
+        raise FileNotFoundError(f"Excel 檔案不存在：{NBA_STATS_FILE}")
+
+    wb = load_workbook(NBA_STATS_FILE)
+    if "球員傷兵" not in wb.sheetnames:
+        wb.create_sheet("球員傷兵")
+    ws = wb["球員傷兵"]
+
+    for idx, title in enumerate(INJURY_HEADERS, start=1):
+        ws.cell(row=1, column=idx, value=title)
+
+    if ws.max_row >= 2:
+        ws.delete_rows(2, ws.max_row - 1)
+
+    for r_idx, row in enumerate(all_rows, start=2):
+        for c_idx, val in enumerate(row, start=1):
+            ws.cell(row=r_idx, column=c_idx, value=val)
+
+    # 固定欄寬（球員傷兵）
+    ws.column_dimensions["A"].width = 8    # 球隊
+    ws.column_dimensions["B"].width = 22   # 球員
+    ws.column_dimensions["C"].width = 8    # 位置
+    ws.column_dimensions["D"].width = 12   # 傷勢
+    ws.column_dimensions["E"].width = 18   # 狀態
+    ws.column_dimensions["F"].width = 12   # 更新日期
+
+    wb.save(NBA_STATS_FILE)
+    wb.close()
+
+
+def main():
+    injuries_only = "--injuries-only" in sys.argv
+
+    print("=" * 60)
+    print("爬取 ESPN MLB 球員資料")
+    print("=" * 60)
+    print(f"Excel: {NBA_STATS_FILE}")
+
+    total = len(MLB_TEAMS)
+    if injuries_only:
+        all_rows = []
+        for i, (team_cn, abbr, slug) in enumerate(MLB_TEAMS, start=1):
+            print(f"[{i}/{total}] {team_cn} 傷兵...")
+            rows = fetch_team_injuries(team_cn, abbr, slug)
+            all_rows.extend(rows)
+            time.sleep(0.25)
+        print(f"\n總計抓到傷兵資料：{len(all_rows)} 筆")
+        write_injury_sheet(all_rows)
+        print("完成：已覆蓋寫入「球員傷兵」分頁。")
+    else:
+        all_rows = []
+        for i, (team_cn, abbr, slug) in enumerate(MLB_TEAMS, start=1):
+            print(f"[{i}/{total}] {team_cn}...")
+            rows = fetch_team_rows(team_cn, abbr, slug)
+            all_rows.extend(rows)
+            time.sleep(0.25)
+        print(f"\n總計抓到球員資料：{len(all_rows)} 筆")
+        write_sheet(all_rows)
+        print("完成：已覆蓋寫入「球員狀態」分頁。")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"錯誤：{e}")
+        sys.exit(1)

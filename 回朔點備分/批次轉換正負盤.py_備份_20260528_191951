@@ -1,0 +1,263 @@
+"""
+選項 C：批次轉換正負盤
+從「每日數據」分頁讀取指定日期範圍的所有資料，計算 O/X，寫入「正負盤」分頁
+用於補齊歷史資料
+"""
+
+import os
+import sys
+import re
+import time
+from datetime import datetime, timedelta
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+
+# 引入選項 A 的轉換函數
+try:
+    from 每日數據轉正負盤 import convert_daily_to_ox
+    from 每日數據轉正負盤 import create_backup
+except ImportError:
+    print("錯誤: 無法引入 每日數據轉正負盤.py 的函數")
+    print("請確保該檔案存在於同一目錄")
+    sys.exit(1)
+
+# 引入設定檔
+try:
+    from config import NBA_XLSX_FILE
+except ImportError:
+    NBA_XLSX_FILE = r"C:\Users\curti\OneDrive\MLB26\MLB26-27數據.xlsx"
+
+
+def parse_date_range(date_range_str):
+    """
+    解析日期範圍字串
+    
+    Args:
+        date_range_str: 日期範圍字串，格式為 YYYYMMDD~YYYYMMDD（例如：20251022~20260214）
+    
+    Returns:
+        list: 日期列表（YYYYMMDD 格式字串）
+    """
+    if '~' not in date_range_str:
+        raise ValueError("日期範圍格式錯誤，應為 YYYYMMDD~YYYYMMDD（例如：20251022~20260214）")
+    
+    parts = date_range_str.split('~')
+    if len(parts) != 2:
+        raise ValueError("日期範圍格式錯誤，應為 YYYYMMDD~YYYYMMDD（例如：20251022~20260214）")
+    
+    start_str = parts[0].strip()
+    end_str = parts[1].strip()
+    
+    if not re.match(r'^\d{8}$', start_str) or not re.match(r'^\d{8}$', end_str):
+        raise ValueError("日期格式錯誤，應為 YYYYMMDD（例如：20251022）")
+    
+    try:
+        start_date = datetime.strptime(start_str, "%Y%m%d")
+        end_date = datetime.strptime(end_str, "%Y%m%d")
+    except ValueError as e:
+        raise ValueError(f"日期格式錯誤: {e}")
+    
+    if start_date > end_date:
+        raise ValueError("起始日期不能晚於結束日期")
+    
+    # 生成日期列表
+    date_list = []
+    current_date = start_date
+    while current_date <= end_date:
+        date_list.append(current_date.strftime("%Y%m%d"))
+        current_date += timedelta(days=1)
+    
+    return date_list
+
+
+def get_existing_ox_counts(excel_file):
+    """
+    檢查「正負盤」中每個日期已有的 O/X 筆數
+    
+    Returns:
+        dict: {MM/DD: O/X 筆數}
+    """
+    result = {}
+    if not os.path.exists(excel_file):
+        return result
+    try:
+        wb = load_workbook(excel_file, read_only=True)
+        if "正負盤" not in wb.sheetnames:
+            wb.close()
+            return result
+        ws_ox = wb["正負盤"]
+        for col_idx in range(2, ws_ox.max_column + 1):
+            col_letter = get_column_letter(col_idx)
+            date_value = ws_ox[f'{col_letter}4'].value
+            if not date_value:
+                continue
+            date_str = date_value.strftime("%m/%d") if isinstance(date_value, datetime) else str(date_value).strip()
+            count = 0
+            for row in range(6, 21):
+                cell_value = ws_ox[f'{col_letter}{row}'].value
+                if cell_value in ['O', 'X']:
+                    count += 1
+            if count > 0:
+                result[date_str] = count
+        wb.close()
+    except Exception as e:
+        print(f"⚠ 檢查現有資料時發生錯誤: {e}")
+    return result
+
+
+def batch_convert_daily_to_ox(excel_file, date_range_str, skip_existing=True):
+    """
+    批次轉換「每日數據」到「正負盤」
+    
+    Args:
+        excel_file: Excel 檔案路徑
+        date_range_str: 日期範圍字串（YYYYMMDD~YYYYMMDD）
+        skip_existing: 是否跳過已存在的日期（預設：True）
+    
+    Returns:
+        dict: 統計資訊 {success_count, fail_count, skipped_count, failed_dates}
+    """
+    print("=" * 60)
+    print("批次轉換正負盤")
+    print("=" * 60)
+    
+    # 解析日期範圍
+    try:
+        date_list = parse_date_range(date_range_str)
+    except ValueError as e:
+        print(f"✗ {e}")
+        return None
+    
+    print(f"日期範圍：{date_range_str}")
+    print(f"總共需要處理：{len(date_list)} 天")
+    
+    skipped_dates = []
+    # 檢查已存在的日期（依場數比對：每日數據場數 > 正負盤 O/X 筆數 才需轉換）
+    if skip_existing:
+        from 每日數據轉正負盤 import convert_date_to_mmddyy, read_games_from_daily_data
+        print(f"\n正在檢查「正負盤」與「每日數據」場數比對...")
+        existing_ox_counts = get_existing_ox_counts(excel_file)
+        dates_to_process = []
+        skipped_dates = []
+        wb = None
+        try:
+            wb = load_workbook(excel_file, read_only=False)
+            ws_daily = wb["每日數據"] if "每日數據" in wb.sheetnames else None
+        except Exception:
+            ws_daily = None
+        for date_str in date_list:
+            date_mmddyy = convert_date_to_mmddyy(date_str)
+            game_count = 0
+            if ws_daily:
+                games = read_games_from_daily_data(ws_daily, date_str)
+                game_count = len(games)
+            ox_count = existing_ox_counts.get(date_mmddyy or "", 0)
+            if game_count > ox_count:
+                dates_to_process.append(date_str)
+            else:
+                skipped_dates.append(date_str)
+        if wb:
+            wb.close()
+        if skipped_dates:
+            print(f"  ✓ 比對完成：{len(existing_ox_counts)} 個日期已有 O/X")
+            print(f"  跳過：{len(skipped_dates)} 天（每日數據場數 ≤ 正負盤筆數）")
+            if len(skipped_dates) <= 10:
+                print(f"    跳過的日期：{', '.join(skipped_dates)}")
+            else:
+                print(f"    跳過的日期：{', '.join(skipped_dates[:10])} ... 等 {len(skipped_dates)} 天")
+        date_list = dates_to_process
+    
+    if not date_list:
+        print(f"\n✓ 所有日期都已存在，無需轉換")
+        return {'success_count': 0, 'fail_count': 0, 'skipped_count': len(skipped_dates), 'failed_dates': []}
+    
+    print(f"需要轉換：{len(date_list)} 天")
+    print("=" * 60)
+    
+    # 統計資訊
+    success_count = 0
+    fail_count = 0
+    failed_dates = []
+    
+    # 逐日轉換
+    total_days = len(date_list)
+    for day_num, target_date in enumerate(date_list, 1):
+        print(f"\n進度：{day_num}/{total_days} ({day_num*100//total_days}%)")
+        print(f"正在轉換：{target_date}")
+        
+        if convert_daily_to_ox(excel_file, target_date, show_progress=True):
+            success_count += 1
+        else:
+            fail_count += 1
+            failed_dates.append(target_date)
+        
+        # 每處理完一天，稍作停頓，避免過度寫入
+        if day_num < total_days:
+            time.sleep(0.5)
+    
+    # 顯示最終結果
+    print("\n" + "=" * 60)
+    print("執行結果統計")
+    print("=" * 60)
+    print(f"總共處理：{len(date_list)} 天")
+    print(f"成功：{success_count} 天")
+    print(f"失敗：{fail_count} 天")
+    if skip_existing:
+        print(f"跳過：{len(skipped_dates)} 天")
+    
+    if failed_dates:
+        print(f"\n失敗的日期：")
+        for date in failed_dates:
+            print(f"  - {date}")
+    
+    print("=" * 60)
+    
+    return {
+        'success_count': success_count,
+        'fail_count': fail_count,
+        'skipped_count': len(skipped_dates) if skip_existing else 0,
+        'failed_dates': failed_dates
+    }
+
+
+def main():
+    """主函數"""
+    # 建立還原點
+    create_backup()
+    
+    print("=" * 60)
+    print("批次轉換正負盤")
+    print("=" * 60)
+    
+    # 檢查參數
+    if len(sys.argv) < 2:
+        print("用法：python 批次轉換正負盤.py YYYYMMDD~YYYYMMDD")
+        print("範例：python 批次轉換正負盤.py 20251022~20260214")
+        sys.exit(1)
+    
+    date_range_str = sys.argv[1].strip()
+    
+    print(f"\nExcel 檔案：{NBA_XLSX_FILE}")
+    print("=" * 60)
+    
+    result = batch_convert_daily_to_ox(NBA_XLSX_FILE, date_range_str, skip_existing=True)
+    
+    if result:
+        if result['fail_count'] == 0:
+            print("\n" + "=" * 60)
+            print("✓ 批次轉換完成！")
+            print("=" * 60)
+        else:
+            print("\n" + "=" * 60)
+            print(f"⚠ 批次轉換完成，但有 {result['fail_count']} 天失敗")
+            print("=" * 60)
+            sys.exit(1)
+    else:
+        print("\n" + "=" * 60)
+        print("✗ 批次轉換失敗！")
+        print("=" * 60)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

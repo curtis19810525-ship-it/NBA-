@@ -1,0 +1,437 @@
+"""
+爬取 ESPN 球員狀態與傷兵資料
+- 球員狀態：Player Stats + Shooting Stats，寫入「球員狀態」分頁（一列一球員）
+- 球員傷兵：Injuries，寫入「球員傷兵」分頁（5欄：球隊、球員、傷勢、狀態、日期）
+每次執行：清空後重寫
+"""
+
+import os
+import sys
+import time
+import re
+import requests
+from bs4 import BeautifulSoup
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+
+# 引入設定檔
+try:
+    from config import NBA_STATS_FILE
+except ImportError:
+    NBA_STATS_FILE = r"C:\Users\curti\OneDrive\MLB26\MLB26-27數據.xlsx"
+
+# Selenium 用於傷兵頁面（若 ESPN 傷兵為動態載入）
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+
+# NBA 30 隊順序（與「各隊正負」一致）
+NBA_TEAMS_ORDER = [
+    '塞爾提克', '籃網', '尼克', '76人', '暴龍', '公牛', '騎士', '活塞', '溜馬', '公鹿',
+    '老鷹', '黃蜂', '熱火', '魔術', '巫師', '勇士', '快艇', '湖人', '太陽', '國王',
+    '金塊', '灰狼', '雷霆', '拓荒者', '爵士', '獨行俠', '火箭', '灰熊', '鵜鶘', '馬刺'
+]
+
+# ESPN 球隊對應（中文隊名 -> abbr, name for URL）
+ESPN_TEAM_MAPPING = {
+    '塞爾提克': {'abbr': 'bos', 'name': 'boston-celtics'},
+    '塞爾提': {'abbr': 'bos', 'name': 'boston-celtics'},
+    '籃網': {'abbr': 'bkn', 'name': 'brooklyn-nets'},
+    '尼克': {'abbr': 'ny', 'name': 'new-york-knicks'},
+    '76人': {'abbr': 'phi', 'name': 'philadelphia-76ers'},
+    '暴龍': {'abbr': 'tor', 'name': 'toronto-raptors'},
+    '公牛': {'abbr': 'chi', 'name': 'chicago-bulls'},
+    '騎士': {'abbr': 'cle', 'name': 'cleveland-cavaliers'},
+    '活塞': {'abbr': 'det', 'name': 'detroit-pistons'},
+    '溜馬': {'abbr': 'ind', 'name': 'indiana-pacers'},
+    '公鹿': {'abbr': 'mil', 'name': 'milwaukee-bucks'},
+    '老鷹': {'abbr': 'atl', 'name': 'atlanta-hawks'},
+    '黃蜂': {'abbr': 'cha', 'name': 'charlotte-hornets'},
+    '熱火': {'abbr': 'mia', 'name': 'miami-heat'},
+    '魔術': {'abbr': 'orl', 'name': 'orlando-magic'},
+    '巫師': {'abbr': 'was', 'name': 'washington-wizards'},
+    '勇士': {'abbr': 'gs', 'name': 'golden-state-warriors'},
+    '快艇': {'abbr': 'lac', 'name': 'los-angeles-clippers'},
+    '湖人': {'abbr': 'lal', 'name': 'los-angeles-lakers'},
+    '太陽': {'abbr': 'phx', 'name': 'phoenix-suns'},
+    '國王': {'abbr': 'sac', 'name': 'sacramento-kings'},
+    '金塊': {'abbr': 'den', 'name': 'denver-nuggets'},
+    '灰狼': {'abbr': 'min', 'name': 'minnesota-timberwolves'},
+    '雷霆': {'abbr': 'okc', 'name': 'oklahoma-city-thunder'},
+    '拓荒者': {'abbr': 'por', 'name': 'portland-trail-blazers'},
+    '爵士': {'abbr': 'utah', 'name': 'utah-jazz'},
+    '獨行俠': {'abbr': 'dal', 'name': 'dallas-mavericks'},
+    '火箭': {'abbr': 'hou', 'name': 'houston-rockets'},
+    '灰熊': {'abbr': 'mem', 'name': 'memphis-grizzlies'},
+    '鵜鶘': {'abbr': 'no', 'name': 'new-orleans-pelicans'},
+    '馬刺': {'abbr': 'sa', 'name': 'san-antonio-spurs'},
+}
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+
+
+def get_espn_team_url(team_cn):
+    """取得 ESPN 該隊的 stats / injuries URL 基礎部分"""
+    info = ESPN_TEAM_MAPPING.get(team_cn)
+    if not info:
+        return None
+    return info['abbr'], info['name']
+
+
+def fetch_stats_page(team_cn):
+    """抓取 ESPN 球隊 Player Stats + Shooting Stats 頁面"""
+    t = get_espn_team_url(team_cn)
+    if not t:
+        return None
+    abbr, name = t
+    url = f"https://www.espn.com/nba/team/stats/_/name/{abbr}/{name}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        return r.text
+    except Exception as e:
+        print(f"  抓取失敗 {team_cn}: {e}")
+        return None
+
+
+def _table_data_rows(table):
+    """取得 table 的資料列（每列為一 list 的 cell 文字），跳過標題列"""
+    tbody = table.find('tbody') or table
+    out = []
+    for tr in tbody.find_all('tr'):
+        cells = tr.find_all(['td', 'th'])
+        if not cells:
+            continue
+        texts = [c.get_text(strip=True) or '' for c in cells]
+        out.append(texts)
+    return out
+
+
+def _ast_to_for_excel(val):
+    """ESPN 在 TO=0 時會顯示 INF，寫入 Excel 改為 0 以便統計。"""
+    if val is None or val == "":
+        return val
+    s = str(val).strip().upper()
+    if s in ("INF", "-INF", "INFINITY", "-INFINITY") or s == "∞":
+        return 0
+    return val
+
+
+def parse_player_stats(html, team_cn):
+    """
+    解析 ESPN 球員統計頁面。ESPN 把「姓名」與「數字」拆成不同 table：
+    - Table 0: 僅 Name 欄（Player Stats）
+    - Table 1: 僅數字欄 GP, GS, MIN, PTS, OR, DR, REB, AST, STL, BLK, TO, PF, AST/TO
+    - Table 2: 僅 Name 欄（Shooting）
+    - Table 3: 僅數字欄 FGM, FGA, FG%, ...
+    依「列索引」對齊合併。
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    rows = []
+    tables = soup.find_all('table')
+    if len(tables) < 4:
+        return rows
+
+    # 表0: 姓名列（每列只有 1 個 cell）
+    name_rows = _table_data_rows(tables[0])
+    # 表1: 數字列（每列 13 個 cell）
+    stat_rows = _table_data_rows(tables[1])
+    # 表2: 姓名列（Shooting）
+    shoot_name_rows = _table_data_rows(tables[2])
+    # 表3: 投籃數字列（每列 14 個 cell）
+    shoot_stat_rows = _table_data_rows(tables[3])
+
+    # 依列對齊，跳過 Total / NAME 標題
+    for i, name_cells in enumerate(name_rows):
+        if not name_cells:
+            continue
+        name_text = name_cells[0]
+        if not name_text or name_text == 'Total' or name_text == 'NAME':
+            continue
+        nums = stat_rows[i] if i < len(stat_rows) else []
+        shoot = shoot_stat_rows[i] if i < len(shoot_stat_rows) else []
+
+        while len(nums) < 13:
+            nums.append('')
+        while len(shoot) < 14:
+            shoot.append('')
+
+        row = [
+            team_cn,
+            name_text,
+            nums[0] if len(nums) > 0 else '',
+            nums[1] if len(nums) > 1 else '',
+            nums[2] if len(nums) > 2 else '',
+            nums[3] if len(nums) > 3 else '',
+            nums[4] if len(nums) > 4 else '',
+            nums[6] if len(nums) > 6 else '',
+            nums[7] if len(nums) > 7 else '',
+            nums[8] if len(nums) > 8 else '',
+            nums[9] if len(nums) > 9 else '',
+            nums[10] if len(nums) > 10 else '',
+            nums[11] if len(nums) > 11 else '',
+            _ast_to_for_excel(nums[12] if len(nums) > 12 else ''),
+            shoot[0] if len(shoot) > 0 else '',
+            shoot[1] if len(shoot) > 1 else '',
+            shoot[2] if len(shoot) > 2 else '',
+            shoot[3] if len(shoot) > 3 else '',
+            shoot[4] if len(shoot) > 4 else '',
+            shoot[5] if len(shoot) > 5 else '',
+            shoot[6] if len(shoot) > 6 else '',
+            shoot[7] if len(shoot) > 7 else '',
+            shoot[8] if len(shoot) > 8 else '',
+            shoot[9] if len(shoot) > 9 else '',
+            shoot[10] if len(shoot) > 10 else '',
+            shoot[11] if len(shoot) > 11 else '',
+            shoot[12] if len(shoot) > 12 else '',
+            shoot[13] if len(shoot) > 13 else '',
+        ]
+        rows.append(row)
+    return rows
+
+
+def fetch_injuries_selenium(team_cn):
+    """使用 Selenium 抓取 ESPN 傷兵頁面"""
+    if not SELENIUM_AVAILABLE:
+        return []
+    t = get_espn_team_url(team_cn)
+    if not t:
+        return []
+    abbr, name = t
+    url = f"https://www.espn.com/nba/team/injuries/_/name/{abbr}/{name}"
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--no-sandbox')
+    options.add_argument(f'user-agent={HEADERS["User-Agent"]}')
+    injuries = []
+    try:
+        driver = webdriver.Chrome(options=options)
+        driver.get(url)
+        time.sleep(2)
+        html = driver.page_source
+        driver.quit()
+        injuries = parse_injuries_html(html, team_cn)
+    except Exception as e:
+        print(f"  傷兵頁 Selenium 失敗 {team_cn}: {e}")
+    return injuries
+
+
+def fetch_injuries_requests(team_cn):
+    """使用 requests 抓取傷兵頁（若為靜態 HTML）"""
+    t = get_espn_team_url(team_cn)
+    if not t:
+        return []
+    abbr, name = t
+    url = f"https://www.espn.com/nba/team/injuries/_/name/{abbr}/{name}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        return parse_injuries_html(r.text, team_cn)
+    except Exception as e:
+        return []
+
+
+def _slug_to_name(slug):
+    """URL slug 轉成球員名，如 payton-pritchard -> Payton Pritchard"""
+    if not slug:
+        return ''
+    return ' '.join(w.capitalize() for w in slug.split('-'))
+
+
+def parse_injuries_html(html, team_cn):
+    """
+    解析傷兵頁 HTML
+    回傳 list of [球隊, 球員, 傷勢, 狀態, 日期]
+    ESPN 結構：日期 + h3(球員名+位置) + a[href=/nba/player/] 內文為 "Status" + 狀態 + 傷勢描述
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    rows = []
+    # 結構1：table（若 ESPN 改回表格版）
+    for table in soup.find_all('table'):
+        for tr in table.find_all('tr')[1:]:
+            cells = tr.find_all(['td', 'th'])
+            if len(cells) >= 4:
+                player = (cells[0].get_text(strip=True) or '').replace('\n', ' ')
+                status = cells[1].get_text(strip=True) if len(cells) > 1 else ''
+                date_val = cells[2].get_text(strip=True) if len(cells) > 2 else ''
+                comment = cells[3].get_text(strip=True) if len(cells) > 3 else ''
+                if player and player.lower() not in ('name', 'player'):
+                    rows.append([team_cn, player, comment, status, date_val])
+        if rows:
+            return rows
+
+    # 結構2：ESPN 現版 - 每個球員一個 a[href*=/nba/player/]，連結文字為 "Status" + 狀態 + 傷勢
+    # 球員名從 href 的 slug 取得（如 /id/4066354/payton-pritchard -> Payton Pritchard）
+    # 日期從該區塊前緣取得（如 Mar 9）
+    for a in soup.find_all('a', href=re.compile(r'/nba/player/_/id/\d+/[^/?#]+')):
+        href = a.get('href') or ''
+        m = re.search(r'/nba/player/_/id/\d+/([^/?#]+)', href)
+        player_slug = m.group(1) if m else ''
+        player = _slug_to_name(player_slug)
+        if not player:
+            continue
+
+        link_text = a.get_text(strip=True) or ''
+        # 連結內文格式: "Status" + 狀態 + 傷勢，例如 "StatusDay-to-dayPritchard (neck) is..."
+        status = ''
+        comment = link_text
+        mo = re.match(r'Status\s*(Out|Day-to-day|Day-To-Day|DTD|Questionable|Probable)\s*(.*)', link_text, re.I | re.DOTALL)
+        if mo:
+            status = mo.group(1)
+            if status and status.lower() == 'dtd':
+                status = 'Day-to-day'
+            comment = (mo.group(2) or '').strip()
+        else:
+            mo2 = re.match(r'Status(Out|Day-to-day|Day-To-Day|DTD|Questionable|Probable)(.*)', link_text, re.I | re.DOTALL)
+            if mo2:
+                status = mo2.group(1)
+                if status and status.lower() == 'dtd':
+                    status = 'Day-to-day'
+                comment = (mo2.group(2) or '').strip()
+        if not status:
+            for m in re.finditer(r'\b(Out|Day-to-day|Day-To-Day|Questionable|Probable)\b', link_text, re.I):
+                status = m.group(1)
+                break
+
+        # 日期：在該連結所在區塊的前方找 "Mar 9" 這種
+        date_val = ''
+        node = a
+        for _ in range(15):
+            if not node:
+                break
+            prev = node.find_previous_sibling() if hasattr(node, 'find_previous_sibling') else None
+            if prev:
+                t = prev.get_text(strip=True) or ''
+                dm = re.search(r'([A-Z][a-z]{2}\s+\d{1,2})', t)
+                if dm:
+                    date_val = dm.group(1)
+                    break
+                node = prev
+            else:
+                node = getattr(node, 'parent', None)
+
+        rows.append([team_cn, player, comment, status, date_val])
+        continue
+
+    # 若上面沒抓到，再試從 h3 取球員名（頁面有 ### Payton PritchardG）
+    if rows:
+        return rows
+    for h in soup.find_all(['h3', 'h2']):
+        ht = h.get_text(strip=True) or ''
+        if not ht or len(ht) < 2:
+            continue
+        player = re.sub(r'\s*[GFCP]\s*$', '', ht)
+        if not player:
+            continue
+        a = h.find_next_sibling('a') or h.find_next('a')
+        if not a or not a.get('href') or '/nba/player/' not in (a.get('href') or ''):
+            continue
+        link_text = a.get_text(strip=True) or ''
+        status = ''
+        for m in re.finditer(r'\b(Out|Day-to-day|Day-To-Day|Questionable|Probable)\b', link_text, re.I):
+            status = m.group(1)
+            break
+        comment = link_text
+        for pat in [r'Status\s*(Out|Day-to-day|Day-To-Day|Questionable|Probable)\s*', r'Status(Out|Day-to-day|Day-To-Day|Questionable|Probable)']:
+            mo = re.match(pat, link_text, re.I)
+            if mo:
+                comment = link_text[mo.end():].strip()
+                break
+        date_val = ''
+        prev = h.find_previous_sibling() or h.parent.find_previous_sibling() if h.parent else None
+        if prev:
+            dm = re.search(r'([A-Z][a-z]{2}\s+\d{1,2})', prev.get_text(strip=True) or '')
+            if dm:
+                date_val = dm.group(1)
+        rows.append([team_cn, player, comment, status, date_val])
+
+    return rows
+
+
+def fetch_injuries(team_cn):
+    """先試 requests，失敗再試 Selenium"""
+    rows = fetch_injuries_requests(team_cn)
+    if not rows and SELENIUM_AVAILABLE:
+        rows = fetch_injuries_selenium(team_cn)
+    return rows
+
+
+def ensure_sheet(wb, name):
+    if name not in wb.sheetnames:
+        wb.create_sheet(name)
+    return wb[name]
+
+
+def write_player_stats(wb, all_rows):
+    """寫入「球員狀態」分頁：清空第2列起，重寫"""
+    sh = ensure_sheet(wb, '球員狀態')
+    max_row = sh.max_row
+    for r in range(max_row, 1, -1):
+        sh.delete_rows(r)
+    for i, row in enumerate(all_rows, start=2):
+        for j, val in enumerate(row, start=1):
+            sh.cell(row=i, column=j, value=val)
+    print(f"  已寫入「球員狀態」{len(all_rows)} 筆（第2列起）")
+
+
+def write_injuries(wb, all_injuries):
+    """寫入「球員傷兵」分頁：清空後重寫，5欄 A 球隊 B 球員 C 傷勢 D 狀態 E 日期"""
+    sh = ensure_sheet(wb, '球員傷兵')
+    sh['A1'] = '球隊'
+    sh['B1'] = '球員'
+    sh['C1'] = '傷勢'
+    sh['D1'] = '狀態'
+    sh['E1'] = '日期'
+    max_row = sh.max_row
+    for r in range(max_row, 1, -1):
+        sh.delete_rows(r)
+    for i, row in enumerate(all_injuries, start=2):
+        for j in range(min(5, len(row))):
+            sh.cell(row=i, column=j + 1, value=row[j] if j < len(row) else '')
+    print(f"  已寫入「球員傷兵」{len(all_injuries)} 筆")
+
+
+def main():
+    print("=" * 60)
+    print("爬取 ESPN 球員狀態與傷兵")
+    print("=" * 60)
+    print(f"Excel: {NBA_STATS_FILE}")
+    if not os.path.exists(NBA_STATS_FILE):
+        print("錯誤：Excel 檔案不存在")
+        sys.exit(1)
+
+    all_stats = []
+    all_injuries = []
+
+    for i, team in enumerate(NBA_TEAMS_ORDER, 1):
+        if team not in ESPN_TEAM_MAPPING:
+            print(f"[{i}/30] 跳過 {team}（無 ESPN 對應）")
+            continue
+        print(f"[{i}/30] {team}...")
+        html = fetch_stats_page(team)
+        if html:
+            rows = parse_player_stats(html, team)
+            all_stats.extend(rows)
+        inj = fetch_injuries(team)
+        all_injuries.extend(inj)
+        time.sleep(0.5)
+
+    print("\n寫入 Excel...")
+    wb = load_workbook(NBA_STATS_FILE)
+    write_player_stats(wb, all_stats)
+    write_injuries(wb, all_injuries)
+    wb.save(NBA_STATS_FILE)
+    print("\n完成。")
+
+
+if __name__ == '__main__':
+    main()

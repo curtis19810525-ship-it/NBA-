@@ -1,0 +1,172 @@
+# -*- coding: utf-8 -*-
+"""
+Crawler + OX + Team Stats (All-in-One with step menu)
+"""
+import os
+import sys
+import subprocess
+from datetime import datetime
+
+
+STEP_NAMES = {
+    1: "Crawler (執行範圍爬蟲)",
+    2: "Batch Convert OX (批次轉換正負盤)",
+    3: "Batch Convert Team Stats (批次轉換各隊正負)",
+    4: "ESPN MLB Player Batting Stats",
+    5: "ESPN MLB Team Total",
+    6: "ESPN MLB Player Injuries",
+}
+
+
+def _render_menu(selected):
+    marker = lambda n: "x" if n in selected else " "
+    print("\n" + "=" * 60)
+    print("MLB Crawler Step Menu")
+    print("=" * 60)
+    print("Toggle by typing step number (e.g. 1 or 1,3,5)")
+    print("A=Select all, N=Select none, 0=Start, Q=Quit")
+    print()
+    print(f"[{marker(1)}] 1. 爬蟲（執行範圍爬蟲.py）")
+    print(f"[{marker(2)}] 2. 批次轉換正負盤（批次轉換正負盤.py）")
+    print(f"[{marker(3)}] 3. 批次轉換各隊正負（批次轉換各隊正負.py）")
+    print(f"[{marker(4)}] 4. 爬取 ESPN MLB 球員打擊數據（球員狀態）")
+    print(f"[{marker(5)}] 5. 爬取 ESPN MLB 各隊 Total（各隊total）")
+    print(f"[{marker(6)}] 6. 爬取 ESPN MLB 球員傷兵（球員傷兵）")
+    print("=" * 60)
+
+
+def _prompt_steps():
+    selected = set()
+    while True:
+        _render_menu(selected)
+        try:
+            cmd = input("請輸入指令：").strip().upper()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            return None
+
+        if cmd == "Q":
+            print("Cancelled.")
+            return None
+        if cmd == "A":
+            selected = {1, 2, 3, 4, 5, 6}
+            continue
+        if cmd == "N":
+            selected = set()
+            continue
+        if cmd == "0":
+            if not selected:
+                print("錯誤：尚未勾選任何步驟，請至少選 1 個步驟。")
+                continue
+            return sorted(selected)
+
+        tokens = [t.strip() for t in cmd.split(",") if t.strip()]
+        invalid = []
+        for token in tokens:
+            if token.isdigit():
+                step = int(token)
+                if step in STEP_NAMES:
+                    if step in selected:
+                        selected.remove(step)
+                    else:
+                        selected.add(step)
+                else:
+                    invalid.append(token)
+            else:
+                invalid.append(token)
+        if invalid:
+            print(f"無效輸入：{', '.join(invalid)}")
+
+
+def _prompt_date(prompt_text):
+    while True:
+        value = input(prompt_text).strip()
+        try:
+            datetime.strptime(value, "%Y%m%d")
+            return value
+        except ValueError:
+            print("日期格式錯誤，請使用 YYYYMMDD（例如 20251022）。")
+
+
+def _prompt_date_range_if_needed(steps):
+    if not any(step in {1, 2, 3} for step in steps):
+        return None, None
+
+    while True:
+        start = _prompt_date("Enter Start Date (YYYYMMDD): ")
+        end = _prompt_date("Enter End Date (YYYYMMDD): ")
+        start_dt = datetime.strptime(start, "%Y%m%d")
+        end_dt = datetime.strptime(end, "%Y%m%d")
+        if start_dt > end_dt:
+            print("錯誤：起始日期不能晚於結束日期，請重新輸入。")
+            continue
+        return start, end
+
+
+def _build_command(step, start, end):
+    if step == 1:
+        return [sys.executable, "執行範圍爬蟲.py", start, end]
+    if step == 2:
+        return [sys.executable, "批次轉換正負盤.py", f"{start}~{end}"]
+    if step == 3:
+        return [sys.executable, "批次轉換各隊正負.py", f"{start}~{end}"]
+    if step == 4:
+        return [sys.executable, "espn_player_stats.py"]
+    if step == 5:
+        return [sys.executable, "espn_team_total.py"]
+    if step == 6:
+        return [sys.executable, "espn_player_stats.py", "--injuries-only"]
+    raise ValueError(f"Unsupported step: {step}")
+
+
+def main():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(base_dir)
+
+    print("=" * 60)
+    print("MLB Crawler + OX + Team Stats (All-in-One)")
+    print("=" * 60)
+    print()
+    print("Please close Excel before running.")
+    print()
+
+    steps = _prompt_steps()
+    if not steps:
+        return 1
+
+    start, end = _prompt_date_range_if_needed(steps)
+    results = []
+
+    print("\n" + "=" * 60)
+    print("Selected steps: " + ", ".join(str(s) for s in steps))
+    if start and end:
+        print(f"Date range: {start}~{end}")
+    print("=" * 60)
+
+    for idx, step in enumerate(steps, start=1):
+        print()
+        print("=" * 60)
+        print(f"Step {idx}/{len(steps)}: {STEP_NAMES[step]}")
+        print("=" * 60)
+        cmd = _build_command(step, start, end)
+        proc = subprocess.run(cmd, cwd=base_dir)
+        status = "OK" if proc.returncode == 0 else "FAILED"
+        print(f"Result: {status} (exit code={proc.returncode})")
+        results.append((step, STEP_NAMES[step], proc.returncode))
+
+    print()
+    print("=" * 60)
+    print("Summary")
+    print("=" * 60)
+    all_ok = True
+    for step, name, code in results:
+        status = "OK" if code == 0 else "FAILED"
+        print(f"Step {step} - {name}: {status}")
+        if code != 0:
+            all_ok = False
+    print("=" * 60)
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

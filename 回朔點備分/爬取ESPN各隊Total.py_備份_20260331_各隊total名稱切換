@@ -1,0 +1,234 @@
+# -*- coding: utf-8 -*-
+"""
+爬取 ESPN 各隊 Team Total（獨立腳本）
+- 資料來源：ESPN Team Stats 頁面（Player Stats + Shooting Stats 的 Total 列）
+- 寫入分頁：各隊total
+- 每次執行：清空第 2 列起，重寫 30 隊資料
+"""
+
+import os
+import sys
+import requests
+from bs4 import BeautifulSoup
+from openpyxl import load_workbook
+
+try:
+    from config import NBA_STATS_FILE
+except ImportError:
+    NBA_STATS_FILE = r"C:\Users\curti\OneDrive\NBA25-26\NBA25-26爬蟲數據.xlsx"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+# 30 隊順序
+NBA_TEAMS_ORDER = [
+    "賽爾提克", "籃網", "尼克", "76人", "暴龍", "公牛", "騎士", "活塞", "溜馬", "公鹿",
+    "老鷹", "黃蜂", "熱火", "魔術", "巫師", "勇士", "快艇", "湖人", "太陽", "國王",
+    "金塊", "灰狼", "雷霆", "拓荒者", "爵士", "獨行俠", "火箭", "灰熊", "鵜鶘", "馬刺",
+]
+
+# 中文隊名 -> ESPN URL 參數
+ESPN_TEAM_MAPPING = {
+    "賽爾提克": {"abbr": "bos", "name": "boston-celtics"},
+    "籃網": {"abbr": "bkn", "name": "brooklyn-nets"},
+    "尼克": {"abbr": "ny", "name": "new-york-knicks"},
+    "76人": {"abbr": "phi", "name": "philadelphia-76ers"},
+    "暴龍": {"abbr": "tor", "name": "toronto-raptors"},
+    "公牛": {"abbr": "chi", "name": "chicago-bulls"},
+    "騎士": {"abbr": "cle", "name": "cleveland-cavaliers"},
+    "活塞": {"abbr": "det", "name": "detroit-pistons"},
+    "溜馬": {"abbr": "ind", "name": "indiana-pacers"},
+    "公鹿": {"abbr": "mil", "name": "milwaukee-bucks"},
+    "老鷹": {"abbr": "atl", "name": "atlanta-hawks"},
+    "黃蜂": {"abbr": "cha", "name": "charlotte-hornets"},
+    "熱火": {"abbr": "mia", "name": "miami-heat"},
+    "魔術": {"abbr": "orl", "name": "orlando-magic"},
+    "巫師": {"abbr": "was", "name": "washington-wizards"},
+    "勇士": {"abbr": "gs", "name": "golden-state-warriors"},
+    "快艇": {"abbr": "lac", "name": "los-angeles-clippers"},
+    "湖人": {"abbr": "lal", "name": "los-angeles-lakers"},
+    "太陽": {"abbr": "phx", "name": "phoenix-suns"},
+    "國王": {"abbr": "sac", "name": "sacramento-kings"},
+    "金塊": {"abbr": "den", "name": "denver-nuggets"},
+    "灰狼": {"abbr": "min", "name": "minnesota-timberwolves"},
+    "雷霆": {"abbr": "okc", "name": "oklahoma-city-thunder"},
+    "拓荒者": {"abbr": "por", "name": "portland-trail-blazers"},
+    "爵士": {"abbr": "utah", "name": "utah-jazz"},
+    "獨行俠": {"abbr": "dal", "name": "dallas-mavericks"},
+    "火箭": {"abbr": "hou", "name": "houston-rockets"},
+    "灰熊": {"abbr": "mem", "name": "memphis-grizzlies"},
+    "鵜鶘": {"abbr": "no", "name": "new-orleans-pelicans"},
+    "馬刺": {"abbr": "sa", "name": "san-antonio-spurs"},
+}
+
+
+def fetch_team_stats_html(team_zh):
+    info = ESPN_TEAM_MAPPING.get(team_zh)
+    if not info:
+        return None
+    url = f"https://www.espn.com/nba/team/stats/_/name/{info['abbr']}/{info['name']}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        return r.text
+    except Exception as e:
+        print(f"  抓取失敗 {team_zh}: {e}")
+        return None
+
+
+def _headers_and_rows(table):
+    """回傳 (headers, rows)；headers 是該表欄名，rows 是資料列(每列 list[str])"""
+    headers = [th.get_text(strip=True) for th in table.find_all("th")]
+    rows = []
+    tbody = table.find("tbody") or table
+    for tr in tbody.find_all("tr"):
+        cells = tr.find_all(["td", "th"])
+        if not cells:
+            continue
+        rows.append([c.get_text(strip=True) for c in cells])
+    return headers, rows
+
+
+def _last_data_row(rows):
+    """取最後一列（通常為 Total）"""
+    if not rows:
+        return []
+    return rows[-1]
+
+
+def parse_team_total(html):
+    """
+    解析 ESPN 統計頁，回傳欄位字典：
+    GP, GS, MIN, PTS, OR, REB, AST, STL, BLK, TO, PF, AST/TO,
+    FGM, FGA, FG%, 3PM, 3PA, 3P%, FTM, FTA, FT%, 2PM, 2PA, 2P%, SC-EFF, SH-EFF
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    tables = soup.find_all("table")
+    if len(tables) < 4:
+        return {}
+
+    # 常見結構：
+    # table0: name-only (Player Stats)
+    # table1: numeric (Player Stats)
+    # table2: name-only (Shooting)
+    # table3: numeric (Shooting)
+    h_stats, rows_stats = _headers_and_rows(tables[1])
+    h_shoot, rows_shoot = _headers_and_rows(tables[3])
+
+    vals_stats = _last_data_row(rows_stats)
+    vals_shoot = _last_data_row(rows_shoot)
+
+    # 以 headers 對齊值，避免欄位順序小變動
+    stats_map = {}
+    if h_stats and vals_stats:
+        # 有些頁面 header 數量可能 > values，取可對齊長度
+        n = min(len(h_stats), len(vals_stats))
+        for i in range(n):
+            k = h_stats[i].upper()
+            stats_map[k] = vals_stats[i]
+
+    shoot_map = {}
+    if h_shoot and vals_shoot:
+        n = min(len(h_shoot), len(vals_shoot))
+        for i in range(n):
+            k = h_shoot[i].upper()
+            shoot_map[k] = vals_shoot[i]
+
+    # 統一輸出欄位
+    out = {
+        "GP": stats_map.get("GP", ""),
+        "GS": stats_map.get("GS", ""),
+        "MIN": stats_map.get("MIN", ""),
+        "PTS": stats_map.get("PTS", ""),
+        "OR": stats_map.get("OR", ""),
+        "REB": stats_map.get("REB", ""),
+        "AST": stats_map.get("AST", ""),
+        "STL": stats_map.get("STL", ""),
+        "BLK": stats_map.get("BLK", ""),
+        "TO": stats_map.get("TO", ""),
+        "PF": stats_map.get("PF", ""),
+        "AST/TO": stats_map.get("AST/TO", ""),
+        "FGM": shoot_map.get("FGM", ""),
+        "FGA": shoot_map.get("FGA", ""),
+        "FG%": shoot_map.get("FG%", ""),
+        "3PM": shoot_map.get("3PM", ""),
+        "3PA": shoot_map.get("3PA", ""),
+        "3P%": shoot_map.get("3P%", ""),
+        "FTM": shoot_map.get("FTM", ""),
+        "FTA": shoot_map.get("FTA", ""),
+        "FT%": shoot_map.get("FT%", ""),
+        "2PM": shoot_map.get("2PM", ""),
+        "2PA": shoot_map.get("2PA", ""),
+        "2P%": shoot_map.get("2P%", ""),
+        "SC-EFF": shoot_map.get("SC-EFF", ""),
+        "SH-EFF": shoot_map.get("SH-EFF", ""),
+    }
+    return out
+
+
+def ensure_sheet(wb, name):
+    if name not in wb.sheetnames:
+        wb.create_sheet(name)
+    return wb[name]
+
+
+def write_totals_to_excel(rows):
+    wb = load_workbook(NBA_STATS_FILE)
+    ws = ensure_sheet(wb, "各隊total")
+
+    # 第2列起清空
+    for r in range(ws.max_row, 1, -1):
+        ws.delete_rows(r)
+
+    # 寫入資料（A~AB）
+    # A 球隊名稱, B NAME/姓名(固定 Total), C~AB 與球員狀態一致
+    for i, row in enumerate(rows, start=2):
+        for j, v in enumerate(row, start=1):
+            ws.cell(row=i, column=j, value=v)
+
+    wb.save(NBA_STATS_FILE)
+
+
+def main():
+    print("=" * 60)
+    print("爬取 ESPN 各隊 Total（獨立）")
+    print("=" * 60)
+    print(f"Excel: {NBA_STATS_FILE}")
+    if not os.path.exists(NBA_STATS_FILE):
+        print("錯誤：Excel 檔案不存在")
+        return 1
+
+    out_rows = []
+    for idx, team in enumerate(NBA_TEAMS_ORDER, start=1):
+        print(f"[{idx:02d}/30] {team}")
+        html = fetch_team_stats_html(team)
+        if not html:
+            # 空值列也照樣寫，避免少隊伍導致定位混亂
+            out_rows.append([team, "Total"] + [""] * 26)
+            continue
+
+        t = parse_team_total(html)
+        row = [
+            team, "Total",
+            t.get("GP", ""), t.get("GS", ""), t.get("MIN", ""), t.get("PTS", ""),
+            t.get("OR", ""), t.get("REB", ""), t.get("AST", ""), t.get("STL", ""),
+            t.get("BLK", ""), t.get("TO", ""), t.get("PF", ""), t.get("AST/TO", ""),
+            t.get("FGM", ""), t.get("FGA", ""), t.get("FG%", ""), t.get("3PM", ""),
+            t.get("3PA", ""), t.get("3P%", ""), t.get("FTM", ""), t.get("FTA", ""),
+            t.get("FT%", ""), t.get("2PM", ""), t.get("2PA", ""), t.get("2P%", ""),
+            t.get("SC-EFF", ""), t.get("SH-EFF", ""),
+        ]
+        out_rows.append(row)
+
+    write_totals_to_excel(out_rows)
+    print("完成：已寫入分頁「各隊total」。")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+

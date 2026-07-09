@@ -1,0 +1,189 @@
+"""
+批次轉換各隊正負
+從「每日數據」分頁讀取指定日期範圍的資料，轉換並寫入「各隊正負」分頁
+"""
+
+from datetime import datetime, timedelta
+from 每日數據轉各隊正負 import convert_daily_to_team_stats
+import os
+
+# 引入設定檔
+try:
+    from config import NBA_STATS_FILE
+except ImportError:
+    # 如果 config.py 不存在，使用預設路徑（OneDrive 目錄）
+    NBA_STATS_FILE = r"C:\Users\curti\OneDrive\MLB26\MLB26-27數據.xlsx"
+
+
+def parse_date_range(date_range_str):
+    """
+    解析日期範圍字串
+    
+    Args:
+        date_range_str: 日期範圍字串（格式：YYYYMMDD~YYYYMMDD，例如：20251022~20260214）
+    
+    Returns:
+        tuple: (start_date, end_date) 或 None（如果解析失敗）
+    """
+    try:
+        if '~' in date_range_str:
+            start_str, end_str = date_range_str.split('~', 1)
+            start_date = datetime.strptime(start_str.strip(), "%Y%m%d")
+            end_date = datetime.strptime(end_str.strip(), "%Y%m%d")
+            return start_date, end_date
+        else:
+            print(f"錯誤：日期範圍格式不正確，應為 YYYYMMDD~YYYYMMDD（例如：20251022~20260214）")
+            return None
+    except ValueError as e:
+        print(f"錯誤：無法解析日期範圍 '{date_range_str}'：{e}")
+        return None
+
+
+def get_existing_team_stats_wl_counts(excel_file):
+    """
+    檢查「各隊正負」分頁中每個日期已有的 W/L 筆數（每場比賽=2筆，客+主）
+    
+    Returns:
+        dict: {YYYYMMDD: W/L 筆數}
+    """
+    import openpyxl
+    result = {}
+    try:
+        if not os.path.exists(excel_file):
+            return result
+        wb = openpyxl.load_workbook(excel_file, data_only=True)
+        if '各隊正負' not in wb.sheetnames:
+            wb.close()
+            return result
+        ws = wb['各隊正負']
+        # 30 隊，每隊 W/L 在第 5 行（起始行+4）
+        wl_rows = [(i * 10 + 5) for i in range(30)]
+        for col_num in range(16, 300):
+            col_letter = openpyxl.utils.get_column_letter(col_num)
+            count = 0
+            for r in wl_rows:
+                v = ws[f'{col_letter}{r}'].value
+                if v and str(v).strip() in ['W', 'L']:
+                    count += 1
+            if count > 0:
+                days_diff = col_num - 16
+                date_obj = datetime(2025, 10, 22) + timedelta(days=days_diff)
+                result[date_obj.strftime("%Y%m%d")] = count
+        wb.close()
+    except Exception as e:
+        print(f"警告：無法檢查已存在的日期：{e}")
+    return result
+
+
+def batch_convert_daily_to_team_stats(excel_file, date_range_str, skip_existing=True):
+    """
+    批次轉換「每日數據」到「各隊正負」
+    
+    Args:
+        excel_file: Excel 檔案路徑
+        date_range_str: 日期範圍字串（格式：YYYYMMDD~YYYYMMDD）
+        skip_existing: 是否跳過已有資料的日期
+    """
+    # 解析日期範圍
+    date_range = parse_date_range(date_range_str)
+    if not date_range:
+        return False
+    
+    start_date, end_date = date_range
+    
+    print("=" * 60)
+    print("批次轉換各隊正負")
+    print("=" * 60)
+    print(f"日期範圍：{start_date.strftime('%Y/%m/%d')} ~ {end_date.strftime('%Y/%m/%d')}")
+    print(f"Excel 檔案：{excel_file}")
+    print(f"跳過已有資料：{'是' if skip_existing else '否'}")
+    print()
+    
+    # 檢查檔案是否存在
+    if not os.path.exists(excel_file):
+        print(f"錯誤：找不到 Excel 檔案：{excel_file}")
+        print(f"請確認：")
+        print(f"  1. 檔案是否存在於該路徑")
+        print(f"  2. 檔案名稱是否為 'MLB26-27數據.xlsx'（或與 config.py 一致）")
+        print(f"  3. 如果檔案在其他位置，請修改 config.py 中的 NBA_STATS_FILE 設定")
+        return False
+
+    # 場數比對：每日數據場數*2 > 各隊正負 W/L 筆數 才需轉換（每場=2筆）
+    from 每日數據轉各隊正負 import read_games_from_daily_data
+    import openpyxl
+    existing_wl_counts = {}
+    game_counts = {}
+    wb = None
+    if skip_existing:
+        print("正在檢查「各隊正負」與「每日數據」場數比對...")
+        existing_wl_counts = get_existing_team_stats_wl_counts(excel_file)
+        wb = None
+        try:
+            wb = openpyxl.load_workbook(excel_file, read_only=False)
+            ws_daily = wb["每日數據"] if "每日數據" in wb.sheetnames else None
+            if ws_daily:
+                current = start_date
+                while current <= end_date:
+                    date_str = current.strftime("%Y%m%d")
+                    games = read_games_from_daily_data(ws_daily, date_str)
+                    game_counts[date_str] = len(games)
+                    current += timedelta(days=1)
+        except Exception as e:
+            print(f"  警告：{e}")
+        finally:
+            if wb:
+                wb.close()
+        print()
+
+    current_date = start_date
+    total_days = 0
+    processed_days = 0
+    skipped_days = 0
+    failed_days = 0
+
+    while current_date <= end_date:
+        total_days += 1
+        date_str = current_date.strftime("%Y%m%d")
+        game_count = game_counts.get(date_str, 0)
+        wl_count = existing_wl_counts.get(date_str, 0)
+        expected_wl = 2 * game_count
+        if skip_existing and game_count > 0 and wl_count >= expected_wl:
+            print(f"  {date_str}：跳過（每日數據 {game_count} 場，各隊正負已有 {wl_count} 筆）")
+            skipped_days += 1
+        else:
+            success = convert_daily_to_team_stats(excel_file, date_str, show_progress=True)
+            if success:
+                processed_days += 1
+            else:
+                failed_days += 1
+
+        current_date += timedelta(days=1)
+    
+    # 顯示統計
+    print()
+    print("=" * 60)
+    print("轉換完成")
+    print("=" * 60)
+    print(f"總天數：{total_days}")
+    print(f"成功轉換：{processed_days}")
+    print(f"跳過：{skipped_days}")
+    print(f"失敗：{failed_days}")
+    print("=" * 60)
+    
+    return True
+
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) < 2:
+        print("使用方法：python 批次轉換各隊正負.py <日期範圍>")
+        print("日期範圍格式：YYYYMMDD~YYYYMMDD（例如：20251022~20260214）")
+        sys.exit(1)
+    
+    date_range_str = sys.argv[1]
+    
+    success = batch_convert_daily_to_team_stats(NBA_STATS_FILE, date_range_str, skip_existing=True)
+    
+    if not success:
+        sys.exit(1)

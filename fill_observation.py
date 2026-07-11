@@ -7,7 +7,7 @@
 自動填入 OneDrive 的「盤口觀察.xlsx → 工作表1」。
 
 規則（與使用者討論定案）：
-  - 吃日期區間：python 填入盤口觀察.py YYYYMMDD~YYYYMMDD
+  - 吃日期區間：python fill_observation.py YYYYMMDD YYYYMMDD（單日可兩個都填同一天）
   - 模型欄、頭、結果欄：逐格只填空白、不覆蓋（含手動修正）
   - 尾欄（G/J/L/O/Q）：每次重跑以玖九最新「開賽前最後快照」覆蓋更新
   - 舊日期：找到 (日期+讓分球隊) 的列補空格；新日期：一場一列接在表尾
@@ -104,17 +104,26 @@ TWO_RESULT_RULES = (
 )
 
 
-def parse_date_range(s: str) -> tuple[datetime, datetime]:
-    s = str(s or "").strip()
-    if "~" in s:
-        a, b = s.split("~", 1)
-    else:
-        a = b = s
-    start = datetime.strptime(a.strip(), "%Y%m%d")
-    end = datetime.strptime(b.strip(), "%Y%m%d")
+def parse_yyyymmdd(s: str) -> datetime:
+    return datetime.strptime(str(s or "").strip(), "%Y%m%d")
+
+
+def resolve_date_range(start_str: str, end_str: str) -> tuple[datetime, datetime]:
+    start = parse_yyyymmdd(start_str)
+    end = parse_yyyymmdd(end_str)
     if end < start:
         start, end = end, start
     return start, end
+
+
+def prompt_date(prompt_text: str) -> str:
+    while True:
+        value = input(prompt_text).strip()
+        try:
+            parse_yyyymmdd(value)
+            return value
+        except ValueError:
+            print("日期格式錯誤，請使用 YYYYMMDD（例如 20251022）。")
 
 
 def daterange(start: datetime, end: datetime):
@@ -434,8 +443,7 @@ def extend_table_and_format(ws, table, orig_bounds, date_fmt: str) -> int | None
     return final_last
 
 
-def build(date_range_str: str) -> None:
-    start, end = parse_date_range(date_range_str)
+def build(start: datetime, end: datetime) -> None:
 
     for p in (MLB_XLSX_FILE, JIUJIU_XLSX_FILE, OBSERVATION_XLSX_FILE):
         if not os.path.exists(p):
@@ -634,18 +642,31 @@ def main() -> None:
             pass
     parser = argparse.ArgumentParser(description="填入盤口觀察")
     parser.add_argument(
-        "date_range",
+        "start_date",
         nargs="?",
-        help="日期區間 YYYYMMDD~YYYYMMDD（單日可只給一個）",
+        help="開始日期 YYYYMMDD",
+    )
+    parser.add_argument(
+        "end_date",
+        nargs="?",
+        help="結束日期 YYYYMMDD（單日可與開始日期相同）",
     )
     args = parser.parse_args()
-    date_range = args.date_range
-    if not date_range:
-        date_range = input("請輸入日期區間 YYYYMMDD~YYYYMMDD（單日可只輸入一個日期）：").strip()
-    if not date_range:
-        print("未輸入日期區間，結束。")
+
+    if args.start_date and args.end_date:
+        start_str, end_str = args.start_date, args.end_date
+    elif args.start_date:
+        start_str = end_str = args.start_date
+    else:
+        start_str = prompt_date("請輸入開始日期 (YYYYMMDD): ")
+        end_str = prompt_date("請輸入結束日期 (YYYYMMDD): ")
+
+    if not start_str or not end_str:
+        print("未輸入日期，結束。")
         return
-    build(date_range)
+
+    start, end = resolve_date_range(start_str, end_str)
+    build(start, end)
 
 
 if __name__ == "__main__":

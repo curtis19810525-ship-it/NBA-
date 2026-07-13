@@ -14,7 +14,7 @@
   - 頭 = 玖九該對戰第 1 筆快照；尾 = 開賽前最後 1 筆快照
   - 結果欄 H/M/R 用「對照表」翻譯；對照表沒有的字串不亂填、會列出來
 
-寫入前自動備份盤口觀察.xlsx（資料夾無 git，用時間戳備份當還原點）。
+寫入前自動備份盤口觀察.xlsx 至「回朔點備分」，僅保留最近 5 份。
 """
 
 from __future__ import annotations
@@ -43,6 +43,9 @@ from analysis_helpers import (
 )
 from config import JIUJIU_XLSX_FILE, MLB_XLSX_FILE, OBSERVATION_XLSX_FILE
 from odds_format import decimal_to_jiujiu_line, format_odds
+
+BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "回朔點備分")
+OBSERVATION_BACKUP_KEEP = int(os.environ.get("OBSERVATION_BACKUP_KEEP", "5"))
 
 SHEET_RECORD = "紀錄"
 # 紀錄分頁的直欄組起始欄（每 10 欄一組）：A、K、U、AE …
@@ -373,11 +376,38 @@ def verify_headers(ws) -> None:
         raise SystemExit("盤口觀察標題列與預期不符，為安全起見中止：\n  " + "\n  ".join(bad))
 
 
-def backup_file(path: str) -> str:
+def _prune_observation_backups(base_name: str, ext: str, *, keep: int) -> list[str]:
+    """刪除超過 keep 份的舊備份，回傳已刪除檔名。"""
+    if keep < 1 or not os.path.isdir(BACKUP_DIR):
+        return []
+    prefix = f"{base_name}_備份_"
+    candidates: list[tuple[float, str]] = []
+    for name in os.listdir(BACKUP_DIR):
+        if not (name.startswith(prefix) and name.endswith(ext)):
+            continue
+        full = os.path.join(BACKUP_DIR, name)
+        if os.path.isfile(full):
+            candidates.append((os.path.getmtime(full), full))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    removed = []
+    for _, full in candidates[keep:]:
+        try:
+            os.remove(full)
+            removed.append(os.path.basename(full))
+        except OSError:
+            pass
+    return removed
+
+
+def backup_file(path: str, *, keep: int = OBSERVATION_BACKUP_KEEP) -> str:
+    os.makedirs(BACKUP_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base, ext = os.path.splitext(path)
-    bak = f"{base}_備份_{ts}{ext}"
+    filename = os.path.basename(path)
+    base_name, ext = os.path.splitext(filename)
+    bak_name = f"{base_name}_備份_{ts}{ext}"
+    bak = os.path.join(BACKUP_DIR, bak_name)
     shutil.copy2(path, bak)
+    _prune_observation_backups(base_name, ext, keep=keep)
     return bak
 
 
@@ -591,7 +621,7 @@ def build(start: datetime, end: datetime) -> None:
             print(f"表格「{main_table.displayName}」範圍已擴張至第 {extended_to} 列並套用格式")
 
     bak = backup_file(OBSERVATION_XLSX_FILE)
-    print(f"已建立還原點（備份）：{bak}")
+    print(f"已建立還原點（備份）：{bak}（回朔點備分，保留最近 {OBSERVATION_BACKUP_KEEP} 份）")
     save_workbook(obs_wb, OBSERVATION_XLSX_FILE)
     obs_wb.close()
     print(f"[完成] 已更新：{OBSERVATION_XLSX_FILE}")

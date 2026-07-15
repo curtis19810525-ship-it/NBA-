@@ -7,7 +7,7 @@
 自動填入 OneDrive 的「盤口觀察.xlsx → 工作表1」。
 
 規則（與使用者討論定案）：
-  - 吃日期區間：python fill_observation.py YYYYMMDD YYYYMMDD（單日可兩個都填同一天）
+  - 吃日期區間：python fill_observation.py YYYYMMDD YYYYMMDD（單日可兩個都填同一天；結束早於開始須重輸、不對調）
   - 模型欄、頭、結果欄：逐格只填空白、不覆蓋（含手動修正）
   - 尾欄（G/J/L/O/Q）：每次重跑以玖九最新「開賽前最後快照」覆蓋更新
   - 舊日期：找到 (日期+讓分球隊) 的列補空格；新日期：一場一列接在表尾
@@ -15,6 +15,7 @@
   - 結果欄 H/M/R 用「對照表」翻譯；對照表沒有的字串不亂填、會列出來
 
 寫入前自動備份盤口觀察.xlsx 至「回朔點備分」，僅保留最近 5 份。
+獨立執行時會取得管線鎖；由 run_all 呼叫時請加 --no-lock。
 """
 
 from __future__ import annotations
@@ -111,22 +112,41 @@ def parse_yyyymmdd(s: str) -> datetime:
     return datetime.strptime(str(s or "").strip(), "%Y%m%d")
 
 
-def resolve_date_range(start_str: str, end_str: str) -> tuple[datetime, datetime]:
-    start = parse_yyyymmdd(start_str)
-    end = parse_yyyymmdd(end_str)
-    if end < start:
-        start, end = end, start
-    return start, end
-
-
 def prompt_date(prompt_text: str) -> str:
     while True:
-        value = input(prompt_text).strip()
+        try:
+            value = input(prompt_text).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n已取消。")
+            raise SystemExit(1)
         try:
             parse_yyyymmdd(value)
             return value
         except ValueError:
             print("日期格式錯誤，請使用 YYYYMMDD（例如 20251022）。")
+
+
+def prompt_date_range_interactive() -> tuple[datetime, datetime]:
+    """兩行起迄；結束早於開始則整段重輸（不對調）。"""
+    while True:
+        start_str = prompt_date("請輸入開始日期 (YYYYMMDD): ")
+        end_str = prompt_date("請輸入結束日期 (YYYYMMDD): ")
+        start = parse_yyyymmdd(start_str)
+        end = parse_yyyymmdd(end_str)
+        if end < start:
+            print("錯誤：結束日期早於開始日期，請重新輸入起迄兩行。")
+            continue
+        return start, end
+
+
+def parse_cli_date_range(start_str: str, end_str: str) -> tuple[datetime, datetime]:
+    start = parse_yyyymmdd(start_str)
+    end = parse_yyyymmdd(end_str)
+    if end < start:
+        raise SystemExit(
+            "錯誤：結束日期早於開始日期。請重新執行並輸入正確起迄（不會自動對調）。"
+        )
+    return start, end
 
 
 def daterange(start: datetime, end: datetime):
@@ -681,22 +701,37 @@ def main() -> None:
         nargs="?",
         help="結束日期 YYYYMMDD（單日可與開始日期相同）",
     )
+    parser.add_argument(
+        "--no-lock",
+        action="store_true",
+        help="由父行程（run_all）已持鎖時略過防並行",
+    )
     args = parser.parse_args()
 
-    if args.start_date and args.end_date:
-        start_str, end_str = args.start_date, args.end_date
-    elif args.start_date:
-        start_str = end_str = args.start_date
-    else:
-        start_str = prompt_date("請輸入開始日期 (YYYYMMDD): ")
-        end_str = prompt_date("請輸入結束日期 (YYYYMMDD): ")
+    lock_held = False
+    if not args.no_lock:
+        from pipeline_lock import acquire_pipeline_lock, release_pipeline_lock
 
-    if not start_str or not end_str:
-        print("未輸入日期，結束。")
-        return
+        acquire_pipeline_lock(
+            os.path.dirname(os.path.abspath(__file__)),
+            owner="填入盤口觀察",
+        )
+        lock_held = True
 
-    start, end = resolve_date_range(start_str, end_str)
-    build(start, end)
+    try:
+        if args.start_date and args.end_date:
+            start, end = parse_cli_date_range(args.start_date, args.end_date)
+        elif args.start_date:
+            start = end = parse_yyyymmdd(args.start_date)
+        else:
+            start, end = prompt_date_range_interactive()
+
+        build(start, end)
+    finally:
+        if lock_held:
+            from pipeline_lock import release_pipeline_lock
+
+            release_pipeline_lock()
 
 
 if __name__ == "__main__":

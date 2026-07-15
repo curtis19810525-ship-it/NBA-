@@ -1,10 +1,9 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-
 echo ============================================================
-echo 爬蟲正負各隊（進階步驟選單）
+echo 抓取今日賽果
 echo ============================================================
-python run_all.py
-
+python run_all.py --preset today_results
+echo.
 pause

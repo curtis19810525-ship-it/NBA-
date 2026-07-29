@@ -2,11 +2,12 @@
 """
 填入盤口觀察
 
-把 MLB26-27「紀錄」分頁的模型欄（讓分球隊/金流/主客/量化）
-與「玖九盤口變化」的盤口頭尾（讓分、讓分獨贏、受讓獨贏、讓2分贏、受讓2分贏）
+把「玖九盤口變化 → 比賽結果／MLB快照」的場次與盤口頭尾，
 自動填入 OneDrive 的「盤口觀察.xlsx → 工作表1」。
+若 MLB26-27「紀錄」同日有對應讓分球隊，再補金流／量化（沒有則留空）。
 
 規則（與使用者討論定案）：
+  - 場次來源：玖九「比賽結果」（不再因「紀錄」缺日而整天 0 場）
   - 吃日期區間：python fill_observation.py YYYYMMDD YYYYMMDD（單日可兩個都填同一天；結束早於開始須重輸、不對調）
   - 模型欄、頭、結果欄：逐格只填空白、不覆蓋（含手動修正）
   - 尾欄（G/J/L/O/Q）：每次重跑以玖九最新「開賽前最後快照」覆蓋更新
@@ -36,7 +37,7 @@ from analysis_helpers import (
     _norm_time,
     all_pregame_snapshots,
     find_jiujiu_game_by_fav,
-    find_result_row,
+    kickoff_matches_focus,
     read_daily_games,
     read_result_rows,
     read_snapshot_rows,
@@ -106,6 +107,29 @@ TWO_RESULT_RULES = (
     ("受讓2分", "X"),
     ("讓2分", "O"),
 )
+
+
+def ensure_excel_files_closed(paths: list[str]) -> None:
+    """偵測檔案被占用（多半 Excel 未關閉）；有占用則中止並提示先存檔關閉。"""
+    locked: list[str] = []
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r+b"):
+                pass
+        except PermissionError:
+            locked.append(path)
+        except OSError as e:
+            winerr = getattr(e, "winerror", None)
+            if winerr == 32 or e.errno in (11, 13, 16):
+                locked.append(path)
+    if locked:
+        lines = "\n".join(f"  - {p}" for p in locked)
+        raise SystemExit(
+            "偵測到以下檔案仍被占用（請先在 Excel「存檔」並關閉後再執行）：\n"
+            f"{lines}"
+        )
 
 
 def parse_yyyymmdd(s: str) -> datetime:
@@ -308,6 +332,62 @@ def resolve_game_teams(
     if pair:
         return pair[0], pair[1], "jiujiu"
     return "", "", ""
+
+
+def _clean_home_name(name: str) -> str:
+    return _cell_str(name).replace("(主)", "").strip()
+
+
+def results_for_date(results: list[dict], focus_date: str) -> list[dict]:
+    """篩出開賽時間落在 focus_date 的比賽結果列。"""
+    out: list[dict] = []
+    for row in results:
+        kick = str(row.get("開賽時間", "") or "").strip()
+        t = _norm_time(kick)
+        if not t:
+            continue
+        if kickoff_matches_focus(kick, focus_date, t):
+            out.append(row)
+    return out
+
+
+def parse_fav_from_result(result: dict) -> tuple[str, str, bool] | None:
+    """
+    從比賽結果解析讓分方。
+    回傳 (顯示隊名, 暱稱, 是否主場讓分)；解析失敗則 None。
+    """
+    away = _cell_str(result.get("客隊"))
+    home = _clean_home_name(result.get("主隊"))
+    spread_side = _cell_str(result.get("讓分方"))
+    away_nick = team_nickname(away) or away
+    home_nick = team_nickname(home) or home
+
+    fav_token = ""
+    m = re.match(r"^(.+?)讓", spread_side)
+    if m:
+        fav_token = m.group(1).strip()
+    fav_nick = team_nickname(fav_token) or fav_token
+
+    def _hit(token: str, nick: str, full: str) -> bool:
+        if not token and not nick:
+            return False
+        if nick and fav_nick and nick == fav_nick:
+            return True
+        if token and nick and (token == nick or token in full or nick in token):
+            return True
+        if nick and nick in spread_side:
+            return True
+        return False
+
+    if _hit(fav_token, home_nick, home):
+        return home_nick or home, home_nick or home, True
+    if _hit(fav_token, away_nick, away):
+        return away_nick or away, away_nick or away, False
+
+    # 讓分方空白時無法可靠判斷，略過
+    if not spread_side:
+        return None
+    return None
 
 
 def fmt_flow(value) -> str:
@@ -558,8 +638,7 @@ def extend_table_and_format(ws, table, orig_bounds, date_fmt: str) -> int | None
 
 
 def build(start: datetime, end: datetime) -> None:
-
-    for p in (MLB_XLSX_FILE, JIUJIU_XLSX_FILE, OBSERVATION_XLSX_FILE):
+    for p in (JIUJIU_XLSX_FILE, OBSERVATION_XLSX_FILE):
         if not os.path.exists(p):
             raise SystemExit(f"找不到檔案：{p}")
 
@@ -568,21 +647,40 @@ def build(start: datetime, end: datetime) -> None:
     print("=" * 60)
     print(f"日期範圍：{start:%Y/%m/%d} ~ {end:%Y/%m/%d}")
     print(f"目標檔：{OBSERVATION_XLSX_FILE}")
-    print("請確認已關閉 Excel 中：MLB26-27數據 / 玖九盤口變化 / 盤口觀察")
+    print("場次來源：玖九「比賽結果」；金流／量化：紀錄有則補、無則留空")
     print()
+    print("【重要】Excel 只顯示記憶體內容；本程式讀的是「已存檔」的磁碟檔。")
+    print("請先在 Excel 對 MLB／玖九／盤口觀察按「存檔」並關閉，再繼續。")
+    print()
+    ensure_excel_files_closed(
+        [MLB_XLSX_FILE, JIUJIU_XLSX_FILE, OBSERVATION_XLSX_FILE]
+    )
     print_lookup_table()
 
-    print("讀取 MLB26-27（紀錄、每日數據）…")
-    mlb_wb = load_workbook(MLB_XLSX_FILE, data_only=True)
-    if SHEET_RECORD not in mlb_wb.sheetnames:
-        raise SystemExit("MLB26-27 找不到「紀錄」分頁")
-    ws_record = mlb_wb[SHEET_RECORD]
+    ws_record = None
+    mlb_wb = None
+    if os.path.exists(MLB_XLSX_FILE):
+        print("讀取 MLB26-27（紀錄、每日數據；用於補金流／量化）…")
+        try:
+            mlb_wb = load_workbook(MLB_XLSX_FILE, data_only=True)
+            if SHEET_RECORD in mlb_wb.sheetnames:
+                ws_record = mlb_wb[SHEET_RECORD]
+            else:
+                print("[注意] MLB26-27 找不到「紀錄」分頁，金流／量化將留空。")
+        except Exception as e:
+            print(f"[注意] 無法讀取 MLB26-27（金流／量化將留空）：{e}")
+            mlb_wb = None
+            ws_record = None
+    else:
+        print("[注意] 找不到 MLB26-27，金流／量化將留空。")
 
     print("讀取玖九（MLB快照、比賽結果）…")
     jj_wb = load_workbook(JIUJIU_XLSX_FILE, read_only=True, data_only=True)
     snapshots = read_snapshot_rows(jj_wb)
     results = read_result_rows(jj_wb)
     jj_wb.close()
+    if not results:
+        raise SystemExit("玖九「比賽結果」沒有資料，無法建立場次。")
 
     obs_wb = load_workbook(OBSERVATION_XLSX_FILE)
     ws = obs_wb[obs_wb.sheetnames[0]]
@@ -606,43 +704,76 @@ def build(start: datetime, end: datetime) -> None:
     new_rows = 0
     filled_cells = 0
     tail_updates = 0
-    jiujiu_fallback_games = 0
-    no_record_dates = []
-    record_diags: dict[str, dict] = {}
+    record_filled = 0
+    no_jiujiu_dates: list[str] = []
+    skipped_no_fav = 0
 
     for focus_date in daterange(start, end):
-        record_games, diag = read_record_games_with_diag(ws_record, focus_date)
-        if not record_games:
-            no_record_dates.append(focus_date)
-            record_diags[focus_date] = diag
+        day_results = results_for_date(results, focus_date)
+        if not day_results:
+            no_jiujiu_dates.append(focus_date)
             continue
-        daily = read_daily_games(mlb_wb, focus_date)
+
+        record_games: list[dict] = []
+        if ws_record is not None:
+            record_games, _diag = read_record_games_with_diag(ws_record, focus_date)
+        record_map = {
+            g["fav_nick"]: g for g in record_games if g.get("fav_nick")
+        }
+
+        daily: list[dict] = []
+        if mlb_wb is not None and "每日數據" in getattr(mlb_wb, "sheetnames", []):
+            try:
+                daily = read_daily_games(mlb_wb, focus_date)
+            except Exception:
+                daily = []
+
         date_obj = datetime.strptime(focus_date, "%Y%m%d")
 
-        for g in record_games:
-            total_games += 1
-            fav_nick = g["fav_nick"]
-            away, home, team_src = resolve_game_teams(
-                daily, snapshots, results, focus_date, g["time"], fav_nick
-            )
-            if team_src == "jiujiu":
-                jiujiu_fallback_games += 1
+        for result in day_results:
+            parsed = parse_fav_from_result(result)
+            if not parsed:
+                skipped_no_fav += 1
+                spread = _cell_str(result.get("讓分方"))
+                if spread:
+                    unknowns.append(f"讓分方無法解析「{spread}」")
+                continue
 
-            if team_nickname(home) == fav_nick:
-                fav_is_home = True
-            elif team_nickname(away) == fav_nick:
-                fav_is_home = False
-            else:
-                fav_is_home = g["side"] == "主"
+            fav_team, fav_nick, fav_is_home = parsed
+            away = _cell_str(result.get("客隊"))
+            home = _clean_home_name(result.get("主隊"))
+            time_str = _norm_time(result.get("開賽時間"))
+            total_games += 1
+
+            # 若客主缺一，嘗試用每日數據／快照補
+            if not away or not home:
+                a2, h2, _src = resolve_game_teams(
+                    daily, snapshots, results, focus_date, time_str, fav_nick
+                )
+                away = away or a2
+                home = home or h2
 
             head = tail = {}
             if away and home:
-                snaps = all_pregame_snapshots(snapshots, focus_date, g["time"], away, home)
+                snaps = all_pregame_snapshots(
+                    snapshots, focus_date, time_str, away, home
+                )
                 if snaps:
                     head, tail = pick_head_tail(snaps, fav_is_home)
 
-            result = find_result_row(results, focus_date, g["time"], away, home) if away and home else None
-            res = translate_results(result or {}, fav_is_home, unknowns)
+            res = translate_results(result, fav_is_home, unknowns)
+            rec = record_map.get(fav_nick)
+            if rec:
+                record_filled += 1
+                flow = fmt_flow(rec.get("flow"))
+                quant = _cell_str(rec.get("quant"))
+                side = _cell_str(rec.get("side")) or ("主" if fav_is_home else "客")
+                display_team = _cell_str(rec.get("fav_team")) or fav_team
+            else:
+                flow = ""
+                quant = ""
+                side = "主" if fav_is_home else "客"
+                display_team = fav_team
 
             key = (focus_date, fav_nick)
             if key in existing:
@@ -655,16 +786,15 @@ def build(start: datetime, end: datetime) -> None:
                 is_new = True
                 new_rows += 1
 
-            # A 日期：新列才寫（舊列保留原值）
             if is_new:
                 if set_if_blank(ws, row, COL_DATE, date_obj, date_fmt):
                     filled_cells += 1
 
             writes = [
-                (COL_TEAM, g["fav_team"]),
-                (COL_FLOW, fmt_flow(g["flow"])),
-                (COL_SIDE, g["side"]),
-                (COL_QUANT, g["quant"]),
+                (COL_TEAM, display_team),
+                (COL_FLOW, flow),
+                (COL_SIDE, side),
+                (COL_QUANT, quant),
                 (COL_SP_HEAD, head.get("sp", "")),
                 (COL_SP_TAIL, tail.get("sp", "")),
                 (COL_SP_RESULT, res["spread"]),
@@ -685,28 +815,30 @@ def build(start: datetime, end: datetime) -> None:
                     if col in TAIL_COLS and not is_new:
                         tail_updates += 1
 
-    if no_record_dates:
-        print()
-        for d in no_record_dates:
-            diagnose_record_miss(ws_record, d, record_diags.get(d, {}))
+    if mlb_wb is not None:
+        mlb_wb.close()
 
-    mlb_wb.close()
+    if no_jiujiu_dates:
+        print()
+        print(
+            "玖九「比賽結果」查無資料的日期："
+            + ", ".join(no_jiujiu_dates)
+            + "（可能尚未結算入表）"
+        )
+    if skipped_no_fav:
+        print(f"[注意] 讓分方無法解析而略過：{skipped_no_fav} 場")
 
     if filled_cells == 0 and new_rows == 0:
-        print("沒有需要填入的空格（可能皆已填過）。未變更檔案。")
-        if no_record_dates:
-            print()
-            for d in no_record_dates:
-                diagnose_record_miss(ws_record, d, record_diags.get(d, {}))
+        print("沒有需要填入的空格（可能皆已填過，或區間內無比賽結果）。未變更檔案。")
         obs_wb.close()
         _report(
-            no_record_dates,
+            no_jiujiu_dates,
             unknowns,
             total_games,
             new_rows,
             filled_cells,
             tail_updates,
-            jiujiu_fallback_games,
+            record_filled=record_filled,
         )
         return
 
@@ -721,39 +853,38 @@ def build(start: datetime, end: datetime) -> None:
     obs_wb.close()
     print(f"[完成] 已更新：{OBSERVATION_XLSX_FILE}")
     _report(
-        no_record_dates,
+        no_jiujiu_dates,
         unknowns,
         total_games,
         new_rows,
         filled_cells,
         tail_updates,
-        jiujiu_fallback_games,
+        record_filled=record_filled,
     )
 
 
 def _report(
-    no_record_dates,
+    no_source_dates,
     unknowns,
     total_games,
     new_rows,
     filled_cells,
     tail_updates=0,
-    jiujiu_fallback_games=0,
+    record_filled=0,
 ) -> None:
     print()
     print("-" * 60)
     print(
         f"處理場次：{total_games}　新增列：{new_rows}　填入格數：{filled_cells}"
         + (f"　尾欄更新：{tail_updates}" if tail_updates else "")
+        + (f"　紀錄補金流／量化：{record_filled}" if record_filled else "")
     )
-    if jiujiu_fallback_games:
-        print(f"每日數據配對失敗、改由玖九配對：{jiujiu_fallback_games} 場")
-    if no_record_dates:
-        print(f"紀錄分頁查無資料的日期：{', '.join(no_record_dates)}")
+    if no_source_dates:
+        print(f"玖九比賽結果查無資料的日期：{', '.join(no_source_dates)}")
     if unknowns:
         from collections import Counter
 
-        print("[注意] 對照表未涵蓋、已留空的結果字串（請補對照表或手動填）：")
+        print("[注意] 對照表未涵蓋／讓分方無法解析的字串：")
         for s, n in Counter(unknowns).most_common():
             print(f"   {s} ×{n}")
     print("-" * 60)

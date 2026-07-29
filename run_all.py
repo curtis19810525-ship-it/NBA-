@@ -270,8 +270,9 @@ def _run_preset_full_range(base_dir: str) -> int:
     print("=" * 60)
     print("完整抓取今日及明日")
     print("=" * 60)
-    print("將依序執行步驟 1～8，最後填入盤口觀察（完整起迄日）。")
-    print("某步失敗不中斷，全部跑完再彙報。請先關閉 Excel。")
+    print("將依序執行步驟 1～8，最後填入盤口觀察（完整起迄日；場次依玖九比賽結果）。")
+    print("某步失敗不中斷，全部跑完再彙報。")
+    print("請先存檔並關閉 Excel（MLB／玖九／盤口觀察）。")
     print()
     start, end = _prompt_date_range(
         warn_if_span=False,

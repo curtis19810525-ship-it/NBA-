@@ -172,24 +172,51 @@ def _cell_str(v) -> str:
 
 def read_record_games(ws, focus_date: str) -> list[dict]:
     """從『紀錄』分頁讀出某日所有場次的模型欄。"""
+    games, _diag = read_record_games_with_diag(ws, focus_date)
+    return games
+
+
+def read_record_games_with_diag(ws, focus_date: str) -> tuple[list[dict], dict]:
+    """回傳 (games, 診斷)。診斷用於查無資料時說明是「找不到日期」還是「日期有但解析不到場次」。"""
+    diag: dict = {
+        "focus_date": focus_date,
+        "date_found": False,
+        "date_row": None,
+        "date_col": None,
+        "a1_raw": ws.cell(1, 1).value,
+        "a1_norm": _norm_date(ws.cell(1, 1).value),
+        "a1_type": type(ws.cell(1, 1).value).__name__,
+        "labels_seen": [],
+        "parsed_games": 0,
+        "skipped_no_team": 0,
+    }
+    game_label_re = re.compile(r"第\s*\d+\s*場")
+
     for dc in record_block_cols(ws):
         date_row = None
-        for r in range(1, ws.max_row + 1):
+        for r in range(1, (ws.max_row or 1) + 1):
             if _norm_date(ws.cell(r, dc).value) == focus_date:
                 date_row = r
                 break
         if date_row is None:
             continue
 
+        diag["date_found"] = True
+        diag["date_row"] = date_row
+        diag["date_col"] = dc
+
         games: list[dict] = []
         r = date_row + 1
         blanks = 0
-        while r <= ws.max_row:
+        while r <= (ws.max_row or 1):
             a = ws.cell(r, dc).value
-            if _norm_date(a) and _norm_date(a) != focus_date:
+            cell_date = _norm_date(a)
+            if cell_date and cell_date != focus_date:
                 break
             label = _cell_str(a)
-            if re.match(r"第\d+場", label):
+            if label and len(diag["labels_seen"]) < 8:
+                diag["labels_seen"].append(label)
+            if game_label_re.match(label):
                 team_venue = _cell_str(ws.cell(r, dc + 1).value)
                 time_str = _norm_time(ws.cell(r + 1, dc).value)
                 flow = ws.cell(r + 1, dc + 4).value
@@ -198,7 +225,7 @@ def read_record_games(ws, focus_date: str) -> list[dict]:
                 if team:
                     games.append(
                         {
-                            "game_label": label,
+                            "game_label": re.sub(r"\s+", "", label),
                             "time": time_str,
                             "fav_team": team,
                             "fav_nick": team_nickname(team),
@@ -207,6 +234,8 @@ def read_record_games(ws, focus_date: str) -> list[dict]:
                             "quant": quant,
                         }
                     )
+                else:
+                    diag["skipped_no_team"] += 1
                 blanks = 0
                 r += 2
                 continue
@@ -215,9 +244,44 @@ def read_record_games(ws, focus_date: str) -> list[dict]:
                 if blanks >= 3:
                     break
             r += 1
+        diag["parsed_games"] = len(games)
         if games:
-            return games
-    return []
+            return games, diag
+    return [], diag
+
+
+def diagnose_record_miss(ws, focus_date: str, diag: dict) -> None:
+    """查無資料時印出可操作的診斷。"""
+    print(f"[診斷] 目標日期：{focus_date}")
+    print(
+        f"[診斷] 紀錄!A1 原始值={diag.get('a1_raw')!r}　"
+        f"型別={diag.get('a1_type')}　正規化={diag.get('a1_norm')!r}"
+    )
+    if not diag.get("date_found"):
+        print(
+            "[診斷] 在「紀錄」各直欄組中找不到此日期表頭。"
+            "請確認已存檔、已關閉 Excel，且 A1（或該日區塊頂端）為 YYYYMMDD／日期。"
+        )
+        # 掃描前 30 列、前 5 組直欄，列出程式認得出的日期
+        found = []
+        for dc in record_block_cols(ws)[:5]:
+            for r in range(1, min(31, (ws.max_row or 1) + 1)):
+                n = _norm_date(ws.cell(r, dc).value)
+                if n:
+                    found.append(f"{get_column_letter(dc)}{r}={n}")
+        if found:
+            print("[診斷] 目前認得到的日期樣例：" + "、".join(found[:12]))
+        else:
+            print("[診斷] 前幾個直欄組幾乎認不到任何日期（可能是 data_only 讀到空值／未存檔）。")
+        return
+    print(
+        f"[診斷] 已找到日期表頭：欄{diag.get('date_col')} 列{diag.get('date_row')}，"
+        f"但解析出場次數={diag.get('parsed_games')}　"
+        f"有「第N場」但隊名解析失敗={diag.get('skipped_no_team')}"
+    )
+    if diag.get("labels_seen"):
+        print("[診斷] 日期下方看到的標籤：" + "、".join(diag["labels_seen"]))
+    print("[診斷] 預期結構：日期列下一列起為「第1場」+ 右側「xxx主場/客場」，再下一列為時間。")
 
 
 def find_daily_game(daily: list[dict], time_str: str, fav_nick: str) -> dict | None:
@@ -544,11 +608,13 @@ def build(start: datetime, end: datetime) -> None:
     tail_updates = 0
     jiujiu_fallback_games = 0
     no_record_dates = []
+    record_diags: dict[str, dict] = {}
 
     for focus_date in daterange(start, end):
-        record_games = read_record_games(ws_record, focus_date)
+        record_games, diag = read_record_games_with_diag(ws_record, focus_date)
         if not record_games:
             no_record_dates.append(focus_date)
+            record_diags[focus_date] = diag
             continue
         daily = read_daily_games(mlb_wb, focus_date)
         date_obj = datetime.strptime(focus_date, "%Y%m%d")
@@ -619,10 +685,19 @@ def build(start: datetime, end: datetime) -> None:
                     if col in TAIL_COLS and not is_new:
                         tail_updates += 1
 
+    if no_record_dates:
+        print()
+        for d in no_record_dates:
+            diagnose_record_miss(ws_record, d, record_diags.get(d, {}))
+
     mlb_wb.close()
 
     if filled_cells == 0 and new_rows == 0:
         print("沒有需要填入的空格（可能皆已填過）。未變更檔案。")
+        if no_record_dates:
+            print()
+            for d in no_record_dates:
+                diagnose_record_miss(ws_record, d, record_diags.get(d, {}))
         obs_wb.close()
         _report(
             no_record_dates,

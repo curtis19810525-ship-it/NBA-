@@ -73,16 +73,53 @@ def _row_dict(headers: list[str], row: tuple) -> dict[str, Any]:
 
 
 def _norm_date(value: Any) -> str:
+    """正規化為 YYYYMMDD；支援 datetime/date、YYYYMMDD 整數/浮點、Excel 日期序號、字串。"""
     if value is None:
         return ""
     if isinstance(value, datetime):
         return value.strftime("%Y%m%d")
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+    if isinstance(value, bool):
+        return ""
     if isinstance(value, int):
         s = str(value)
         return s if len(s) == 8 and s.isdigit() else ""
-    s = str(value).strip().replace("-", "").replace("/", "")
-    if len(s) >= 8 and s[:8].isdigit():
-        return s[:8]
+    if isinstance(value, float):
+        if value != value:  # NaN
+            return ""
+        # 儲存成 20260729 / 20260729.0
+        as_int = int(round(value))
+        if abs(value - as_int) < 1e-9 and 20000101 <= as_int <= 20991231:
+            s = str(as_int)
+            if len(s) == 8:
+                return s
+        # Excel 日期序號（畫面可能自訂顯示成 YYYYMMDD）
+        if 20000.0 <= value <= 80000.0:
+            try:
+                from openpyxl.utils.datetime import from_excel
+
+                dt = from_excel(value)
+                if isinstance(dt, datetime):
+                    return dt.strftime("%Y%m%d")
+                if isinstance(dt, date):
+                    return dt.strftime("%Y%m%d")
+            except Exception:
+                pass
+        return ""
+    s = str(value).strip()
+    m = re.match(r"^(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})", s)
+    if m:
+        return f"{int(m.group(1)):04d}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+    m = re.match(r"^(\d{4})年(\d{1,2})月(\d{1,2})日?", s)
+    if m:
+        return f"{int(m.group(1)):04d}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+    compact = s.replace("-", "").replace("/", "").replace(".", "").replace(" ", "")
+    if len(compact) >= 8 and compact[:8].isdigit():
+        return compact[:8]
+    digits = re.sub(r"\D", "", s)
+    if len(digits) == 8 and digits.startswith("20"):
+        return digits
     return ""
 
 

@@ -5,6 +5,7 @@
 把「玖九盤口變化 → 比賽結果／MLB快照」的場次與盤口頭尾，
 自動填入 OneDrive 的「盤口觀察.xlsx → 工作表1」。
 若 MLB26-27「紀錄」同日有對應讓分球隊，再補金流／量化（沒有則留空）。
+賽前：紀錄有場次即可建列並填頭盤；比賽結果有資料再填 H／M／R。
 
 規則（與使用者討論定案）：
   - 場次來源：玖九「比賽結果」（不再因「紀錄」缺日而整天 0 場）
@@ -37,6 +38,7 @@ from analysis_helpers import (
     _norm_time,
     all_pregame_snapshots,
     find_jiujiu_game_by_fav,
+    find_result_row,
     kickoff_matches_focus,
     read_daily_games,
     read_result_rows,
@@ -705,21 +707,71 @@ def build(start: datetime, end: datetime) -> None:
     filled_cells = 0
     tail_updates = 0
     record_filled = 0
-    no_jiujiu_dates: list[str] = []
+    no_source_dates: list[str] = []
     skipped_no_fav = 0
+    pregame_rows = 0
 
     for focus_date in daterange(start, end):
         day_results = results_for_date(results, focus_date)
-        if not day_results:
-            no_jiujiu_dates.append(focus_date)
-            continue
-
         record_games: list[dict] = []
         if ws_record is not None:
             record_games, _diag = read_record_games_with_diag(ws_record, focus_date)
         record_map = {
             g["fav_nick"]: g for g in record_games if g.get("fav_nick")
         }
+
+        # 合併場次：比賽結果（有賽果）+ 紀錄（賽前建頭盤）
+        jobs: list[dict] = []
+        seen_nicks: set[str] = set()
+
+        for result in day_results:
+            parsed = parse_fav_from_result(result)
+            if not parsed:
+                skipped_no_fav += 1
+                spread = _cell_str(result.get("讓分方"))
+                if spread:
+                    unknowns.append(f"讓分方無法解析「{spread}」")
+                continue
+            fav_team, fav_nick, fav_is_home = parsed
+            if fav_nick in seen_nicks:
+                continue
+            seen_nicks.add(fav_nick)
+            jobs.append(
+                {
+                    "source": "result",
+                    "result": result,
+                    "fav_team": fav_team,
+                    "fav_nick": fav_nick,
+                    "fav_is_home": fav_is_home,
+                    "away": _cell_str(result.get("客隊")),
+                    "home": _clean_home_name(result.get("主隊")),
+                    "time": _norm_time(result.get("開賽時間")),
+                }
+            )
+
+        for g in record_games:
+            fav_nick = g.get("fav_nick") or ""
+            if not fav_nick or fav_nick in seen_nicks:
+                continue
+            seen_nicks.add(fav_nick)
+            side = _cell_str(g.get("side"))
+            jobs.append(
+                {
+                    "source": "record",
+                    "result": None,
+                    "fav_team": _cell_str(g.get("fav_team")) or fav_nick,
+                    "fav_nick": fav_nick,
+                    "fav_is_home": side == "主",
+                    "away": "",
+                    "home": "",
+                    "time": _norm_time(g.get("time")),
+                    "record": g,
+                }
+            )
+
+        if not jobs:
+            no_source_dates.append(focus_date)
+            continue
 
         daily: list[dict] = []
         if mlb_wb is not None and "每日數據" in getattr(mlb_wb, "sheetnames", []):
@@ -730,22 +782,18 @@ def build(start: datetime, end: datetime) -> None:
 
         date_obj = datetime.strptime(focus_date, "%Y%m%d")
 
-        for result in day_results:
-            parsed = parse_fav_from_result(result)
-            if not parsed:
-                skipped_no_fav += 1
-                spread = _cell_str(result.get("讓分方"))
-                if spread:
-                    unknowns.append(f"讓分方無法解析「{spread}」")
-                continue
-
-            fav_team, fav_nick, fav_is_home = parsed
-            away = _cell_str(result.get("客隊"))
-            home = _clean_home_name(result.get("主隊"))
-            time_str = _norm_time(result.get("開賽時間"))
+        for job in jobs:
+            fav_team = job["fav_team"]
+            fav_nick = job["fav_nick"]
+            fav_is_home = job["fav_is_home"]
+            away = job.get("away") or ""
+            home = job.get("home") or ""
+            time_str = job.get("time") or ""
+            result = job.get("result")
             total_games += 1
+            if job.get("source") == "record" and result is None:
+                pregame_rows += 1
 
-            # 若客主缺一，嘗試用每日數據／快照補
             if not away or not home:
                 a2, h2, _src = resolve_game_teams(
                     daily, snapshots, results, focus_date, time_str, fav_nick
@@ -753,16 +801,25 @@ def build(start: datetime, end: datetime) -> None:
                 away = away or a2
                 home = home or h2
 
+            # 若仍無客主，無法取快照頭尾；仍可寫模型欄
             head = tail = {}
-            if away and home:
+            if away and home and time_str:
                 snaps = all_pregame_snapshots(
                     snapshots, focus_date, time_str, away, home
                 )
                 if snaps:
+                    # 若僅有紀錄來源，依隊名再確認主客
+                    if team_nickname(home) == fav_nick:
+                        fav_is_home = True
+                    elif team_nickname(away) == fav_nick:
+                        fav_is_home = False
                     head, tail = pick_head_tail(snaps, fav_is_home)
 
-            res = translate_results(result, fav_is_home, unknowns)
-            rec = record_map.get(fav_nick)
+            if result is None and away and home and time_str:
+                result = find_result_row(results, focus_date, time_str, away, home)
+
+            res = translate_results(result or {}, fav_is_home, unknowns)
+            rec = job.get("record") or record_map.get(fav_nick)
             if rec:
                 record_filled += 1
                 flow = fmt_flow(rec.get("flow"))
@@ -818,21 +875,22 @@ def build(start: datetime, end: datetime) -> None:
     if mlb_wb is not None:
         mlb_wb.close()
 
-    if no_jiujiu_dates:
+    if no_source_dates:
         print()
         print(
-            "玖九「比賽結果」查無資料的日期："
-            + ", ".join(no_jiujiu_dates)
-            + "（可能尚未結算入表）"
+            "無場次可寫的日期（玖九比賽結果與紀錄皆無）："
+            + ", ".join(no_source_dates)
         )
     if skipped_no_fav:
         print(f"[注意] 讓分方無法解析而略過：{skipped_no_fav} 場")
+    if pregame_rows:
+        print(f"賽前建列（僅頭盤／模型，尚無比賽結果）：{pregame_rows} 場")
 
     if filled_cells == 0 and new_rows == 0:
-        print("沒有需要填入的空格（可能皆已填過，或區間內無比賽結果）。未變更檔案。")
+        print("沒有需要填入的空格（可能皆已填過，或區間內無場次）。未變更檔案。")
         obs_wb.close()
         _report(
-            no_jiujiu_dates,
+            no_source_dates,
             unknowns,
             total_games,
             new_rows,
@@ -853,7 +911,7 @@ def build(start: datetime, end: datetime) -> None:
     obs_wb.close()
     print(f"[完成] 已更新：{OBSERVATION_XLSX_FILE}")
     _report(
-        no_jiujiu_dates,
+        no_source_dates,
         unknowns,
         total_games,
         new_rows,

@@ -9,6 +9,7 @@
   4) 爬蟲今天步驟 1～8
   5) 總表 A1 改為今天並 Excel COM 重算存檔
   6) 填盤口觀察（今天：可建頭盤；有比賽結果再填結果欄）
+  7) 匯出昨天／今天「紀錄」給 NotebookLM（剪貼簿預設今天）
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from fill_observation import (
     prompt_date,
 )
 from fill_observation import build as fill_observation_build
+from notebooklm_export import export_yesterday_and_today
 from pipeline_lock import acquire_pipeline_lock, release_pipeline_lock
 from run_all import STEP_NAMES_ZH, _run_steps
 
@@ -80,7 +82,8 @@ def main() -> int:
     print("回家日常（一鍵）")
     print("=" * 60)
     print("流程：補昨天盤口觀察 → 爬昨天1～3 → 紀錄A→K →")
-    print("      爬今天1～8 → 總表A1改今天並重算 → 填今天盤口觀察")
+    print("      爬今天1～8 → 總表A1改今天並重算 → 填今天盤口觀察 →")
+    print("      匯出紀錄給 NotebookLM（昨天＋今天；剪貼簿＝今天）")
     print()
     print("【重要】執行期間請關閉 Excel（MLB／玖九／盤口觀察）。")
     print("白天手機抓的玖九資料請已同步到本機 OneDrive。")
@@ -99,7 +102,7 @@ def main() -> int:
         )
 
         # 1) 昨天盤口觀察（賽果）
-        _section(f"步驟 1/6：填入盤口觀察（昨天 {yesterday}）")
+        _section(f"步驟 1/7：填入盤口觀察（昨天 {yesterday}）")
         try:
             _run_fill(yesterday, yesterday)
             results_log.append(("填盤口觀察(昨天)", True, "OK"))
@@ -111,7 +114,7 @@ def main() -> int:
             print(f"[失敗] {e}")
 
         # 2) 爬昨天 1～3
-        _section(f"步驟 2/6：爬蟲正負各隊（昨天 {yesterday}，步驟 1～3）")
+        _section(f"步驟 2/7：爬蟲正負各隊（昨天 {yesterday}，步驟 1～3）")
         ensure_excel_files_closed([MLB_XLSX_FILE])
         step_results = _run_steps(base_dir, [1, 2, 3], yesterday, yesterday)
         ok = all(code == 0 for _, _, code in step_results)
@@ -124,7 +127,7 @@ def main() -> int:
             print("[警告] 昨天步驟有失敗，仍繼續後續流程。")
 
         # 3) 紀錄 A→K
-        _section("步驟 3/6：紀錄備份 A1:I33 → 清空 K1:S33 後貼上值")
+        _section("步驟 3/7：紀錄備份 A1:I33 → 清空 K1:S33 後貼上值")
         ensure_excel_files_closed([MLB_XLSX_FILE])
         try:
             archive_record_a_to_k(MLB_XLSX_FILE)
@@ -138,7 +141,7 @@ def main() -> int:
             print(f"[失敗] {e}")
 
         # 4) 爬今天 1～8
-        _section(f"步驟 4/6：爬蟲正負各隊（今天 {today}，步驟 1～8）")
+        _section(f"步驟 4/7：爬蟲正負各隊（今天 {today}，步驟 1～8）")
         ensure_excel_files_closed([MLB_XLSX_FILE])
         step_results = _run_steps(
             base_dir, [1, 2, 3, 4, 5, 6, 7, 8], today, today
@@ -152,7 +155,7 @@ def main() -> int:
             print("[警告] 今天步驟有失敗，仍繼續後續流程。")
 
         # 5) 總表 A1 + 重算
-        _section(f"步驟 5/6：總表 A1 → {today}（Excel COM 重算）")
+        _section(f"步驟 5/7：總表 A1 → {today}（Excel COM 重算）")
         ensure_excel_files_closed([MLB_XLSX_FILE])
         try:
             set_zongbiao_a1_and_recalc(MLB_XLSX_FILE, today)
@@ -165,7 +168,7 @@ def main() -> int:
             print(f"[失敗] {e}")
 
         # 6) 今天盤口觀察
-        _section(f"步驟 6/6：填入盤口觀察（今天 {today}，可建頭盤）")
+        _section(f"步驟 6/7：填入盤口觀察（今天 {today}，可建頭盤）")
         try:
             _run_fill(today, today)
             results_log.append(("填盤口觀察(今天)", True, "OK"))
@@ -174,6 +177,29 @@ def main() -> int:
             print(f"[失敗] {e}")
         except Exception as e:
             results_log.append(("填盤口觀察(今天)", False, str(e)))
+            print(f"[失敗] {e}")
+
+        # 7) NotebookLM 匯出
+        _section("步驟 7/7：匯出紀錄給 NotebookLM（昨天＋今天）")
+        ensure_excel_files_closed([MLB_XLSX_FILE])
+        try:
+            info = export_yesterday_and_today(yesterday, today, mlb_xlsx=MLB_XLSX_FILE)
+            print(f"昨天：{info['yesterday_path']}（{info['yesterday_games']} 場）")
+            print(f"今天：{info['today_path']}（{info['today_games']} 場）")
+            print("已將「今天」內容複製到剪貼簿 → 可直接到 NotebookLM Ctrl+V 貼上資料來源。")
+            print("昨天請開啟對應 txt 手動複製。")
+            results_log.append(
+                (
+                    "NotebookLM匯出",
+                    True,
+                    f"昨{info['yesterday_games']}場/今{info['today_games']}場",
+                )
+            )
+        except SystemExit as e:
+            results_log.append(("NotebookLM匯出", False, str(e)))
+            print(f"[失敗] {e}")
+        except Exception as e:
+            results_log.append(("NotebookLM匯出", False, str(e)))
             print(f"[失敗] {e}")
 
     finally:
@@ -191,12 +217,11 @@ def main() -> int:
         print(f"{status}  {name}" + (f"  ({detail})" if detail and not ok else ""))
     print("=" * 60)
     if all_ok:
-        print("全部步驟完成。可開啟總表／紀錄檢查，並貼 NotebookLM。")
+        print("全部步驟完成。可將剪貼簿內容貼到 NotebookLM 資料來源。")
     else:
         print("有步驟失敗：請依上方 FAILED 項目重跑對應段落。")
     return 0 if all_ok else 1
 
 
 if __name__ == "__main__":
-    # 避免 fill_observation 被 import 時與 --no-lock 衝突；此編排自管鎖
     sys.exit(main())

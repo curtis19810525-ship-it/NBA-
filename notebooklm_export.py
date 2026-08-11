@@ -6,7 +6,8 @@
   - 格式：條列
   - 空值：_
   - 金流：72%
-  - 昨天／今天各存一份；剪貼簿預設複製今天
+  - 賽果日／關注日各存一份；剪貼簿預設複製關注日
+  - 檔案位置：專案目錄下 exports\\NotebookLM_紀錄_YYYYMMDD.txt
 """
 
 from __future__ import annotations
@@ -240,22 +241,39 @@ def export_record_for_notebooklm(
     return out_path, len(games)
 
 
+def export_results_and_focus(
+    results_day: str,
+    focus_day: str,
+    *,
+    mlb_xlsx: str | None = None,
+) -> dict:
+    """匯出賽果日＋關注日；剪貼簿只放關注日。"""
+    r_path, r_n = export_record_for_notebooklm(
+        results_day, mlb_xlsx=mlb_xlsx, copy_to_clipboard=False
+    )
+    f_path, f_n = export_record_for_notebooklm(
+        focus_day, mlb_xlsx=mlb_xlsx, copy_to_clipboard=True
+    )
+    export_dir = os.path.dirname(os.path.abspath(f_path))
+    return {
+        "export_dir": export_dir,
+        "results_path": r_path,
+        "results_games": r_n,
+        "focus_path": f_path,
+        "focus_games": f_n,
+        # 舊鍵別名（相容）
+        "yesterday_path": r_path,
+        "yesterday_games": r_n,
+        "today_path": f_path,
+        "today_games": f_n,
+    }
+
+
 def export_yesterday_and_today(
     yesterday: str,
     today: str,
     *,
     mlb_xlsx: str | None = None,
 ) -> dict:
-    """匯出昨天＋今天；剪貼簿只放今天。"""
-    y_path, y_n = export_record_for_notebooklm(
-        yesterday, mlb_xlsx=mlb_xlsx, copy_to_clipboard=False
-    )
-    t_path, t_n = export_record_for_notebooklm(
-        today, mlb_xlsx=mlb_xlsx, copy_to_clipboard=True
-    )
-    return {
-        "yesterday_path": y_path,
-        "yesterday_games": y_n,
-        "today_path": t_path,
-        "today_games": t_n,
-    }
+    """相容舊名稱：yesterday＝賽果日、today＝關注日。"""
+    return export_results_and_focus(yesterday, today, mlb_xlsx=mlb_xlsx)

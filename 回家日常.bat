@@ -9,7 +9,9 @@ echo 請先確認：
 echo   1. 手機玖九資料已同步到本機
 echo   2. 已關閉 Excel：MLB26-27 / 玖九盤口變化 / 盤口觀察
 echo   3. 本機有安裝桌面版 Excel（步驟會用 COM 重算）
-echo   4. 結束後會匯出紀錄 txt，並把「今天」複製到剪貼簿供貼 NotebookLM
+echo   4. 輸入兩日：賽果日（歸檔）＋ 關注日（總表 A1）
+echo      例 8/11 晚間：賽果日=20260811、關注日=20260812
+echo   5. 結束後 exports\ 會有 txt；剪貼簿＝關注日，供貼 NotebookLM
 echo.
 python home_pipeline.py
 echo.

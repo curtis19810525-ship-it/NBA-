@@ -2,20 +2,25 @@
 """
 回家日常一鍵流程
 
-例：昨天=20260731、今天=20260801
-  1) 填盤口觀察（昨天賽果）
-  2) 爬蟲昨天步驟 1～3
+日期語意（勿再用「昨天／今天」誤解）：
+  - 賽果日／歸檔日：已打完、要補盤口觀察賽果、爬 1～3、紀錄 A→K 的那一天
+  - 關注日／總表 A1：接下來要分析的日子；爬 1～8、寫入總表!A1、建頭盤、NotebookLM「今天」剪貼簿
+
+例：日曆 8/11 晚間執行 → 賽果日=20260811、關注日=20260812
+  1) 填盤口觀察（賽果日）
+  2) 爬蟲賽果日步驟 1～3
   3) 紀錄 A1:I33 → 清空 K1:S33 後貼上值（Excel COM）
-  4) 爬蟲今天步驟 1～8
-  5) 總表 A1 改為今天並 Excel COM 重算存檔
-  6) 填盤口觀察（今天：可建頭盤；有比賽結果再填結果欄）
-  7) 匯出昨天／今天「紀錄」給 NotebookLM（剪貼簿預設今天）
+  4) 爬蟲關注日步驟 1～8
+  5) 總表 A1 改為關注日並 Excel COM 重算存檔
+  6) 填盤口觀察（關注日：可建頭盤；有比賽結果再填結果欄）
+  7) 匯出賽果日／關注日「紀錄」給 NotebookLM（剪貼簿＝關注日；檔在專案\\exports\\）
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timedelta
 
 from config import JIUJIU_XLSX_FILE, MLB_XLSX_FILE, OBSERVATION_XLSX_FILE
 from excel_com_ops import archive_record_a_to_k, set_zongbiao_a1_and_recalc
@@ -25,7 +30,7 @@ from fill_observation import (
     prompt_date,
 )
 from fill_observation import build as fill_observation_build
-from notebooklm_export import export_yesterday_and_today
+from notebooklm_export import export_results_and_focus
 from pipeline_lock import acquire_pipeline_lock, release_pipeline_lock
 from run_all import STEP_NAMES_ZH, _run_steps
 
@@ -38,25 +43,48 @@ def _configure_stdio() -> None:
             pass
 
 
-def _prompt_yesterday_today() -> tuple[str, str]:
-    print("請輸入「昨天」與「今天」（YYYYMMDD）。")
+def _local_yyyymmdd(offset_days: int = 0) -> str:
+    return (datetime.now() + timedelta(days=offset_days)).strftime("%Y%m%d")
+
+
+def _prompt_results_and_focus() -> tuple[str, str]:
+    """
+    回傳 (賽果日, 關注日)。
+    預設：賽果日＝本機今天、關注日＝明天（晚間跑完後總表 A1 指向隔天）。
+    """
+    default_results = _local_yyyymmdd(0)
+    default_focus = _local_yyyymmdd(1)
+    print("請輸入「賽果日」與「關注日」（YYYYMMDD）。")
+    print("  賽果日＝已打完要歸檔／補賽果的日子（爬 1～3、紀錄 A→K）")
+    print("  關注日＝接下來要分析的日子（爬 1～8、總表 A1、剪貼簿）")
+    print(
+        f"例：日曆今天跑完 → 賽果日={default_results}、"
+        f"關注日={default_focus} → 總表 A1 會變成 {default_focus}"
+    )
+    print("直接按 Enter 可採用括號內預設。")
     while True:
-        yesterday = prompt_date("請輸入昨天日期 (YYYYMMDD): ")
-        today = prompt_date("請輸入今天日期 (YYYYMMDD): ")
-        y = parse_yyyymmdd(yesterday)
-        t = parse_yyyymmdd(today)
-        if t < y:
-            print("錯誤：今天不可早於昨天，請重新輸入。")
+        results_day = prompt_date(
+            f"請輸入賽果日／歸檔日 (YYYYMMDD) [{default_results}]: ",
+            default=default_results,
+        )
+        focus_day = prompt_date(
+            f"請輸入關注日／總表A1 (YYYYMMDD) [{default_focus}]: ",
+            default=default_focus,
+        )
+        r = parse_yyyymmdd(results_day)
+        f = parse_yyyymmdd(focus_day)
+        if f < r:
+            print("錯誤：關注日不可早於賽果日，請重新輸入。")
             continue
-        if (t - y).days != 1:
-            print(f"警告：今天不是昨天的隔天（間隔 {(t - y).days} 天）。")
+        if (f - r).days != 1:
+            print(f"警告：關注日不是賽果日的隔天（間隔 {(f - r).days} 天）。")
             try:
                 ans = input("按 Enter 繼續，或輸入 Q 重輸：").strip().upper()
             except (EOFError, KeyboardInterrupt):
                 raise SystemExit(1)
             if ans == "Q":
                 continue
-        return yesterday, today
+        return results_day, focus_day
 
 
 def _section(title: str) -> None:
@@ -81,17 +109,18 @@ def main() -> int:
     print("=" * 60)
     print("回家日常（一鍵）")
     print("=" * 60)
-    print("流程：補昨天盤口觀察 → 爬昨天1～3 → 紀錄A→K →")
-    print("      爬今天1～8 → 總表A1改今天並重算 → 填今天盤口觀察 →")
-    print("      匯出紀錄給 NotebookLM（昨天＋今天；剪貼簿＝今天）")
+    print("流程：補賽果日盤口觀察 → 爬賽果日1～3 → 紀錄A→K →")
+    print("      爬關注日1～8 → 總表A1改關注日並重算 → 填關注日盤口觀察 →")
+    print("      匯出紀錄給 NotebookLM（賽果日＋關注日；剪貼簿＝關注日）")
     print()
     print("【重要】執行期間請關閉 Excel（MLB／玖九／盤口觀察）。")
     print("白天手機抓的玖九資料請已同步到本機 OneDrive。")
     print()
 
-    yesterday, today = _prompt_yesterday_today()
+    results_day, focus_day = _prompt_results_and_focus()
     print()
-    print(f"昨天：{yesterday}　今天：{today}")
+    print(f"賽果日：{results_day}　關注日：{focus_day}")
+    print(f"→ 步驟 5 會把總表!A1 設成 {focus_day}")
 
     acquire_pipeline_lock(base_dir, owner="回家日常")
     results_log: list[tuple[str, bool, str]] = []
@@ -101,30 +130,30 @@ def main() -> int:
             [MLB_XLSX_FILE, JIUJIU_XLSX_FILE, OBSERVATION_XLSX_FILE]
         )
 
-        # 1) 昨天盤口觀察（賽果）
-        _section(f"步驟 1/7：填入盤口觀察（昨天 {yesterday}）")
+        # 1) 賽果日盤口觀察
+        _section(f"步驟 1/7：填入盤口觀察（賽果日 {results_day}）")
         try:
-            _run_fill(yesterday, yesterday)
-            results_log.append(("填盤口觀察(昨天)", True, "OK"))
+            _run_fill(results_day, results_day)
+            results_log.append(("填盤口觀察(賽果日)", True, "OK"))
         except SystemExit as e:
-            results_log.append(("填盤口觀察(昨天)", False, str(e)))
+            results_log.append(("填盤口觀察(賽果日)", False, str(e)))
             print(f"[失敗] {e}")
         except Exception as e:
-            results_log.append(("填盤口觀察(昨天)", False, str(e)))
+            results_log.append(("填盤口觀察(賽果日)", False, str(e)))
             print(f"[失敗] {e}")
 
-        # 2) 爬昨天 1～3
-        _section(f"步驟 2/7：爬蟲正負各隊（昨天 {yesterday}，步驟 1～3）")
+        # 2) 爬賽果日 1～3
+        _section(f"步驟 2/7：爬蟲正負各隊（賽果日 {results_day}，步驟 1～3）")
         ensure_excel_files_closed([MLB_XLSX_FILE])
-        step_results = _run_steps(base_dir, [1, 2, 3], yesterday, yesterday)
+        step_results = _run_steps(base_dir, [1, 2, 3], results_day, results_day)
         ok = all(code == 0 for _, _, code in step_results)
         detail = ", ".join(
             f"{STEP_NAMES_ZH.get(s, s)}={'OK' if c == 0 else 'FAIL'}"
             for s, _, c in step_results
         )
-        results_log.append(("爬蟲昨天1～3", ok, detail))
+        results_log.append(("爬蟲賽果日1～3", ok, detail))
         if not ok:
-            print("[警告] 昨天步驟有失敗，仍繼續後續流程。")
+            print("[警告] 賽果日步驟有失敗，仍繼續後續流程。")
 
         # 3) 紀錄 A→K
         _section("步驟 3/7：紀錄備份 A1:I33 → 清空 K1:S33 後貼上值")
@@ -135,31 +164,31 @@ def main() -> int:
         except SystemExit as e:
             results_log.append(("紀錄A→K", False, str(e)))
             print(f"[失敗] {e}")
-            print("後續總表重算／今天盤口觀察可能受影響。")
+            print("後續總表重算／關注日盤口觀察可能受影響。")
         except Exception as e:
             results_log.append(("紀錄A→K", False, str(e)))
             print(f"[失敗] {e}")
 
-        # 4) 爬今天 1～8
-        _section(f"步驟 4/7：爬蟲正負各隊（今天 {today}，步驟 1～8）")
+        # 4) 爬關注日 1～8
+        _section(f"步驟 4/7：爬蟲正負各隊（關注日 {focus_day}，步驟 1～8）")
         ensure_excel_files_closed([MLB_XLSX_FILE])
         step_results = _run_steps(
-            base_dir, [1, 2, 3, 4, 5, 6, 7, 8], today, today
+            base_dir, [1, 2, 3, 4, 5, 6, 7, 8], focus_day, focus_day
         )
         ok = all(code == 0 for _, _, code in step_results)
         detail = ", ".join(
             f"{s}={'OK' if c == 0 else 'FAIL'}" for s, _, c in step_results
         )
-        results_log.append(("爬蟲今天1～8", ok, detail))
+        results_log.append(("爬蟲關注日1～8", ok, detail))
         if not ok:
-            print("[警告] 今天步驟有失敗，仍繼續後續流程。")
+            print("[警告] 關注日步驟有失敗，仍繼續後續流程。")
 
-        # 5) 總表 A1 + 重算
-        _section(f"步驟 5/7：總表 A1 → {today}（Excel COM 重算）")
+        # 5) 總表 A1 = 關注日 + 重算
+        _section(f"步驟 5/7：總表 A1 → {focus_day}（Excel COM 重算）")
         ensure_excel_files_closed([MLB_XLSX_FILE])
         try:
-            set_zongbiao_a1_and_recalc(MLB_XLSX_FILE, today)
-            results_log.append(("總表A1重算", True, "OK"))
+            set_zongbiao_a1_and_recalc(MLB_XLSX_FILE, focus_day)
+            results_log.append(("總表A1重算", True, f"A1={focus_day}"))
         except SystemExit as e:
             results_log.append(("總表A1重算", False, str(e)))
             print(f"[失敗] {e}")
@@ -167,32 +196,39 @@ def main() -> int:
             results_log.append(("總表A1重算", False, str(e)))
             print(f"[失敗] {e}")
 
-        # 6) 今天盤口觀察
-        _section(f"步驟 6/7：填入盤口觀察（今天 {today}，可建頭盤）")
+        # 6) 關注日盤口觀察
+        _section(f"步驟 6/7：填入盤口觀察（關注日 {focus_day}，可建頭盤）")
         try:
-            _run_fill(today, today)
-            results_log.append(("填盤口觀察(今天)", True, "OK"))
+            _run_fill(focus_day, focus_day)
+            results_log.append(("填盤口觀察(關注日)", True, "OK"))
         except SystemExit as e:
-            results_log.append(("填盤口觀察(今天)", False, str(e)))
+            results_log.append(("填盤口觀察(關注日)", False, str(e)))
             print(f"[失敗] {e}")
         except Exception as e:
-            results_log.append(("填盤口觀察(今天)", False, str(e)))
+            results_log.append(("填盤口觀察(關注日)", False, str(e)))
             print(f"[失敗] {e}")
 
         # 7) NotebookLM 匯出
-        _section("步驟 7/7：匯出紀錄給 NotebookLM（昨天＋今天）")
+        _section("步驟 7/7：匯出紀錄給 NotebookLM（賽果日＋關注日）")
         ensure_excel_files_closed([MLB_XLSX_FILE])
         try:
-            info = export_yesterday_and_today(yesterday, today, mlb_xlsx=MLB_XLSX_FILE)
-            print(f"昨天：{info['yesterday_path']}（{info['yesterday_games']} 場）")
-            print(f"今天：{info['today_path']}（{info['today_games']} 場）")
-            print("已將「今天」內容複製到剪貼簿 → 可直接到 NotebookLM Ctrl+V 貼上資料來源。")
-            print("昨天請開啟對應 txt 手動複製。")
+            info = export_results_and_focus(
+                results_day, focus_day, mlb_xlsx=MLB_XLSX_FILE
+            )
+            print(f"檔案目錄：{info['export_dir']}")
+            print(
+                f"賽果日：{info['results_path']}（{info['results_games']} 場）"
+            )
+            print(f"關注日：{info['focus_path']}（{info['focus_games']} 場）")
+            print(
+                "已將「關注日」內容複製到剪貼簿 → 可直接到 NotebookLM Ctrl+V 貼上資料來源。"
+            )
+            print("賽果日請開啟對應 txt 手動複製。")
             results_log.append(
                 (
                     "NotebookLM匯出",
                     True,
-                    f"昨{info['yesterday_games']}場/今{info['today_games']}場",
+                    f"賽果{info['results_games']}場/關注{info['focus_games']}場",
                 )
             )
         except SystemExit as e:
@@ -214,10 +250,18 @@ def main() -> int:
         status = "OK" if ok else "FAILED"
         if not ok:
             all_ok = False
-        print(f"{status}  {name}" + (f"  ({detail})" if detail and not ok else ""))
+        # 成功時也顯示 A1= 等簡短 detail
+        extra = ""
+        if detail and (not ok or detail.startswith("A1=") or "場" in detail):
+            extra = f"  ({detail})"
+        print(f"{status}  {name}{extra}")
     print("=" * 60)
     if all_ok:
-        print("全部步驟完成。可將剪貼簿內容貼到 NotebookLM 資料來源。")
+        print(
+            f"全部步驟完成。總表 A1 應為 {focus_day}；"
+            "剪貼簿＝關注日，可貼到 NotebookLM。"
+        )
+        print(f"匯出 txt 在專案資料夾下的 exports\\ 目錄。")
     else:
         print("有步驟失敗：請依上方 FAILED 項目重跑對應段落。")
     return 0 if all_ok else 1

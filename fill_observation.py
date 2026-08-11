@@ -138,13 +138,16 @@ def parse_yyyymmdd(s: str) -> datetime:
     return datetime.strptime(str(s or "").strip(), "%Y%m%d")
 
 
-def prompt_date(prompt_text: str) -> str:
+def prompt_date(prompt_text: str, default: str | None = None) -> str:
+    """請輸入 YYYYMMDD；若提供 default，空白 Enter 則採用預設。"""
     while True:
         try:
             value = input(prompt_text).strip()
         except (EOFError, KeyboardInterrupt):
             print("\n已取消。")
             raise SystemExit(1)
+        if not value and default:
+            value = default
         try:
             parse_yyyymmdd(value)
             return value

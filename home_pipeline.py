@@ -9,7 +9,7 @@
 例：日曆 8/11 晚間執行 → 賽果日=20260811、關注日=20260812
   1) 填盤口觀察（賽果日）
   2) 爬蟲賽果日步驟 1～3
-  3) 紀錄 A1:I33 → 清空 K1:S33 後貼上值（Excel COM）
+  3) 總表先切回賽果日並重算 → 紀錄 A→K 貼上值，K1 強制＝賽果日
   4) 爬蟲關注日步驟 1～8
   5) 總表 A1 改為關注日並 Excel COM 重算存檔
   6) 填盤口觀察（關注日：可建頭盤；有比賽結果再填結果欄）
@@ -109,7 +109,7 @@ def main() -> int:
     print("=" * 60)
     print("回家日常（一鍵）")
     print("=" * 60)
-    print("流程：補賽果日盤口觀察 → 爬賽果日1～3 → 紀錄A→K →")
+    print("流程：補賽果日盤口觀察 → 爬賽果日1～3 → 總表切賽果日並A→K（K1＝賽果日） →")
     print("      爬關注日1～8 → 總表A1改關注日並重算 → 填關注日盤口觀察 →")
     print("      匯出紀錄給 NotebookLM（賽果日＋關注日；剪貼簿＝關注日）")
     print()
@@ -155,12 +155,17 @@ def main() -> int:
         if not ok:
             print("[警告] 賽果日步驟有失敗，仍繼續後續流程。")
 
-        # 3) 紀錄 A→K
-        _section("步驟 3/7：紀錄備份 A1:I33 → 清空 K1:S33 後貼上值")
+        # 3) 先讓「紀錄」A 區顯示賽果日，再歸檔到 K（K1＝賽果日）
+        _section(
+            f"步驟 3/7：總表→{results_day} 重算後，紀錄 A→K（K1={results_day}）"
+        )
         ensure_excel_files_closed([MLB_XLSX_FILE])
         try:
-            archive_record_a_to_k(MLB_XLSX_FILE)
-            results_log.append(("紀錄A→K", True, "OK"))
+            # 歸檔前必須讓 A 區是賽果日內容；否則若總表已是關注日，
+            # 貼上值會讓 K1 也變成關注日（例如兩邊都是 20260812）。
+            set_zongbiao_a1_and_recalc(MLB_XLSX_FILE, results_day)
+            archive_record_a_to_k(MLB_XLSX_FILE, archive_date=results_day)
+            results_log.append(("紀錄A→K", True, f"K1={results_day}"))
         except SystemExit as e:
             results_log.append(("紀錄A→K", False, str(e)))
             print(f"[失敗] {e}")
@@ -252,7 +257,12 @@ def main() -> int:
             all_ok = False
         # 成功時也顯示 A1= 等簡短 detail
         extra = ""
-        if detail and (not ok or detail.startswith("A1=") or "場" in detail):
+        if detail and (
+            not ok
+            or detail.startswith("A1=")
+            or detail.startswith("K1=")
+            or "場" in detail
+        ):
             extra = f"  ({detail})"
         print(f"{status}  {name}{extra}")
     print("=" * 60)

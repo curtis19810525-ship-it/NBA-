@@ -71,12 +71,21 @@ def archive_record_a_to_k(
     *,
     src_range: str = "A1:I33",
     dst_range: str = "K1:S33",
+    archive_date: str | None = None,
 ) -> None:
     """
     先清空 K1:S33，再把 A1:I33「貼上值」到 K1:S33。
     使用 Excel COM，確保貼的是計算後的值而非公式。
+
+    archive_date：若提供（賽果日 YYYYMMDD），貼上後強制寫入 K1，
+    避免來源 A1 已是關注日導致歸檔日期標頭錯誤。
     """
     _require_windows_excel()
+    if archive_date is not None:
+        archive_date = str(archive_date).strip()
+        if len(archive_date) != 8 or not archive_date.isdigit():
+            raise SystemExit(f"歸檔日期格式錯誤：{archive_date}")
+
     excel, wb = _open_excel_workbook(mlb_xlsx)
     try:
         if SHEET_RECORD not in [sh.Name for sh in wb.Worksheets]:
@@ -91,8 +100,17 @@ def archive_record_a_to_k(
             excel.CutCopyMode = False
         except Exception:
             pass
+        # K 區日期標頭＝賽果日／歸檔日（與 A 區關注日分開）
+        if archive_date is not None:
+            # dst_range 形如 K1:S33 → 取左上角 K1
+            k1 = dst_range.split(":", 1)[0].strip()
+            ws.Range(k1).NumberFormat = "@"
+            ws.Range(k1).Value = archive_date
         wb.Save()
-        print(f"[Excel] 紀錄已備份：清空 {dst_range} 後，將 {src_range} 貼上值到 {dst_range}")
+        msg = f"[Excel] 紀錄已備份：清空 {dst_range} 後，將 {src_range} 貼上值到 {dst_range}"
+        if archive_date is not None:
+            msg += f"；K1={archive_date}"
+        print(msg)
     finally:
         _close_excel(excel, wb, save=False)
 

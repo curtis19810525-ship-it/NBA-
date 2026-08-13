@@ -13,7 +13,7 @@
   4) 爬蟲關注日步驟 1～8
   5) 總表 A1 改為關注日並 Excel COM 重算存檔
   6) 填盤口觀察（關注日：可建頭盤；有比賽結果再填結果欄）
-  7) 匯出賽果日／關注日「紀錄」給 NotebookLM（剪貼簿＝關注日；檔在專案\\exports\\）
+  7) 匯出 YYYYMMDD賽後結果.txt（賽果日）與 YYYYMMDD賽前推薦.txt（關注日；剪貼簿）
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def main() -> int:
     print("=" * 60)
     print("流程：補賽果日盤口觀察 → 爬賽果日1～3 → 總表切賽果日並A→K（K1＝賽果日） →")
     print("      爬關注日1～8 → 總表A1改關注日並重算 → 填關注日盤口觀察 →")
-    print("      匯出紀錄給 NotebookLM（賽果日＋關注日；剪貼簿＝關注日）")
+    print("      匯出 exports：賽後結果.txt（賽果日）＋賽前推薦.txt（關注日；剪貼簿）")
     print()
     print("【重要】執行期間請關閉 Excel（MLB／玖九／盤口觀察）。")
     print("白天手機抓的玖九資料請已同步到本機 OneDrive。")
@@ -120,7 +120,7 @@ def main() -> int:
     results_day, focus_day = _prompt_results_and_focus()
     print()
     print(f"賽果日：{results_day}　關注日：{focus_day}")
-    print(f"→ 步驟 5 會把總表!A1 設成 {focus_day}")
+    print(f"→ 歸檔後紀錄!K1 應為 {results_day}；步驟 5 總表!A1／紀錄!A1 應為 {focus_day}")
 
     acquire_pipeline_lock(base_dir, owner="回家日常")
     results_log: list[tuple[str, bool, str]] = []
@@ -222,13 +222,13 @@ def main() -> int:
             )
             print(f"檔案目錄：{info['export_dir']}")
             print(
-                f"賽果日：{info['results_path']}（{info['results_games']} 場）"
+                f"賽後結果：{info['results_path']}（{info['results_games']} 場）"
             )
-            print(f"關注日：{info['focus_path']}（{info['focus_games']} 場）")
+            print(f"賽前推薦：{info['focus_path']}（{info['focus_games']} 場）")
             print(
-                "已將「關注日」內容複製到剪貼簿 → 可直接到 NotebookLM Ctrl+V 貼上資料來源。"
+                "已將「賽前推薦」複製到剪貼簿 → 可直接到 NotebookLM Ctrl+V 貼上資料來源。"
             )
-            print("賽果日請開啟對應 txt 手動複製。")
+            print("賽後結果請開啟對應 txt 手動複製。")
             results_log.append(
                 (
                     "NotebookLM匯出",
@@ -268,10 +268,13 @@ def main() -> int:
     print("=" * 60)
     if all_ok:
         print(
-            f"全部步驟完成。總表 A1 應為 {focus_day}；"
-            "剪貼簿＝關注日，可貼到 NotebookLM。"
+            f"全部步驟完成。紀錄 K1 應為 {results_day}；"
+            f"總表／紀錄 A1 應為 {focus_day}；剪貼簿＝賽前推薦。"
         )
-        print(f"匯出 txt 在專案資料夾下的 exports\\ 目錄。")
+        print(
+            f"匯出：exports\\{results_day}賽後結果.txt、"
+            f"exports\\{focus_day}賽前推薦.txt"
+        )
     else:
         print("有步驟失敗：請依上方 FAILED 項目重跑對應段落。")
     return 0 if all_ok else 1

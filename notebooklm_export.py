@@ -6,8 +6,9 @@
   - 格式：條列
   - 空值：_
   - 金流：72%
-  - 賽果日／關注日各存一份；剪貼簿預設複製關注日
-  - 檔案位置：專案目錄下 exports\\NotebookLM_紀錄_YYYYMMDD.txt
+  - 賽果日／關注日各存一份；剪貼簿預設複製關注日（賽前推薦）
+  - 檔名：YYYYMMDD賽後結果.txt（賽果日）、YYYYMMDD賽前推薦.txt（關注日）
+  - 檔案位置：專案目錄下 exports\\
 """
 
 from __future__ import annotations
@@ -31,6 +32,13 @@ from fill_observation import (
 EXPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exports")
 EMPTY = "_"
 GAME_LABEL_RE = re.compile(r"第\s*\d+\s*場")
+KIND_PREGAME = "賽前推薦"
+KIND_RESULTS = "賽後結果"
+
+
+def export_filename(yyyymmdd: str, kind: str) -> str:
+    """例：20260813賽前推薦.txt、20260813賽後結果.txt"""
+    return f"{yyyymmdd}{kind}.txt"
 
 
 def _is_error_value(value) -> bool:
@@ -135,10 +143,17 @@ def read_record_export_games(ws, focus_date: str) -> list[dict]:
     return []
 
 
-def format_notebooklm_text(focus_date: str, games: list[dict], *, exported_at: datetime | None = None) -> str:
+def format_notebooklm_text(
+    focus_date: str,
+    games: list[dict],
+    *,
+    kind: str = KIND_PREGAME,
+    exported_at: datetime | None = None,
+) -> str:
     exported_at = exported_at or datetime.now()
     lines = [
         "【MLB 紀錄匯出｜資料來源】",
+        f"類型：{kind}",
         f"日期：{focus_date}",
         "來源檔：MLB26-27數據.xlsx → 紀錄",
         "匯出範圍：A1:I33（有比賽區；實際依日期區塊解析）",
@@ -208,12 +223,14 @@ def copy_text_to_clipboard(text: str) -> None:
 def export_record_for_notebooklm(
     focus_date: str,
     *,
+    kind: str = KIND_PREGAME,
     mlb_xlsx: str | None = None,
     export_dir: str | None = None,
     copy_to_clipboard: bool = False,
 ) -> tuple[str, int]:
     """
     匯出單一日期。回傳 (檔案路徑, 場次數)。
+    kind：賽前推薦（關注日）或 賽後結果（賽果日）。
     """
     mlb_xlsx = mlb_xlsx or MLB_XLSX_FILE
     export_dir = export_dir or EXPORT_DIR
@@ -230,8 +247,8 @@ def export_record_for_notebooklm(
     finally:
         wb.close()
 
-    text = format_notebooklm_text(focus_date, games)
-    out_path = os.path.join(export_dir, f"NotebookLM_紀錄_{focus_date}.txt")
+    text = format_notebooklm_text(focus_date, games, kind=kind)
+    out_path = os.path.join(export_dir, export_filename(focus_date, kind))
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(text)
 
@@ -247,12 +264,18 @@ def export_results_and_focus(
     *,
     mlb_xlsx: str | None = None,
 ) -> dict:
-    """匯出賽果日＋關注日；剪貼簿只放關注日。"""
+    """匯出賽果日（賽後結果）＋關注日（賽前推薦）；剪貼簿只放關注日。"""
     r_path, r_n = export_record_for_notebooklm(
-        results_day, mlb_xlsx=mlb_xlsx, copy_to_clipboard=False
+        results_day,
+        kind=KIND_RESULTS,
+        mlb_xlsx=mlb_xlsx,
+        copy_to_clipboard=False,
     )
     f_path, f_n = export_record_for_notebooklm(
-        focus_day, mlb_xlsx=mlb_xlsx, copy_to_clipboard=True
+        focus_day,
+        kind=KIND_PREGAME,
+        mlb_xlsx=mlb_xlsx,
+        copy_to_clipboard=True,
     )
     export_dir = os.path.dirname(os.path.abspath(f_path))
     return {

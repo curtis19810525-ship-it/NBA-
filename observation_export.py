@@ -1,12 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-匯出「盤口觀察.xlsx」為 NotebookLM 資料來源用條列文字。
+匯出「盤口觀察.xlsx」讀取與走勢摘要（供 integrated_export 合併用）。
 
-定案：
-  - 檔名：YYYYMMDD盤口觀察（賽前）.txt（關注日）
-         YYYYMMDD盤口結果（賽後）.txt（賽果日）
-  - 含頭→尾走勢摘要；H/M/R 結果欄保留（無資料為 _）
-  - 檔案位置：專案目錄下 exports\\
+獨立四份 txt 已停用；請使用 integrated_export.export_integrated_for_pipeline。
 """
 
 from __future__ import annotations

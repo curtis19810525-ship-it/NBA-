@@ -13,7 +13,7 @@
   4) 爬蟲關注日步驟 1～8
   5) 總表 A1 改為關注日並 Excel COM 重算存檔
   6) 填盤口觀察（關注日：可建頭盤；有比賽結果再填結果欄）
-  7) 匯出紀錄＋盤口觀察 txt（賽果日／關注日；剪貼簿＝賽前推薦）
+  7) 匯出整合 txt：{賽果日}賽後結果、{關注日}賽前分析（剪貼簿）
 """
 
 from __future__ import annotations
@@ -30,8 +30,7 @@ from fill_observation import (
     prompt_date,
 )
 from fill_observation import build as fill_observation_build
-from notebooklm_export import export_results_and_focus
-from observation_export import export_observations_for_pipeline
+from integrated_export import export_integrated_for_pipeline
 from pipeline_lock import acquire_pipeline_lock, release_pipeline_lock
 from run_all import STEP_NAMES_ZH, _run_steps
 
@@ -112,7 +111,7 @@ def main() -> int:
     print("=" * 60)
     print("流程：補賽果日盤口觀察 → 爬賽果日1～3 → 總表切賽果日並A→K（K1＝賽果日） →")
     print("      爬關注日1～8 → 總表A1改關注日並重算 → 填關注日盤口觀察 →")
-    print("      匯出 exports：紀錄＋盤口觀察（賽前推薦→剪貼簿）")
+    print("      匯出 exports：賽後結果.txt ＋ 賽前分析.txt（剪貼簿＝賽前分析）")
     print()
     print("【重要】執行期間請關閉 Excel（MLB／玖九／盤口觀察）。")
     print("白天手機抓的玖九資料請已同步到本機 OneDrive。")
@@ -214,41 +213,34 @@ def main() -> int:
             results_log.append(("填盤口觀察(關注日)", False, str(e)))
             print(f"[失敗] {e}")
 
-        # 7) NotebookLM 匯出（紀錄＋盤口觀察）
-        _section("步驟 7/7：匯出紀錄＋盤口觀察給 NotebookLM")
+        # 7) NotebookLM 整合匯出
+        _section("步驟 7/7：匯出整合分析給 NotebookLM")
         ensure_excel_files_closed(
             [MLB_XLSX_FILE, OBSERVATION_XLSX_FILE]
         )
         try:
-            info = export_results_and_focus(
-                results_day, focus_day, mlb_xlsx=MLB_XLSX_FILE
-            )
-            obs = export_observations_for_pipeline(
-                results_day, focus_day, observation_xlsx=OBSERVATION_XLSX_FILE
+            info = export_integrated_for_pipeline(
+                results_day,
+                focus_day,
+                mlb_xlsx=MLB_XLSX_FILE,
+                observation_xlsx=OBSERVATION_XLSX_FILE,
             )
             print(f"檔案目錄：{info['export_dir']}")
             print(
-                f"紀錄賽後：{info['results_path']}（{info['results_games']} 場）"
-            )
-            print(f"紀錄賽前：{info['focus_path']}（{info['focus_games']} 場）")
-            print(
-                f"盤口賽後：{obs['obs_results_path']}（{obs['obs_results_games']} 場）"
+                f"賽後結果：{info['results_path']}（{info['results_games']} 場）"
             )
             print(
-                f"盤口賽前：{obs['obs_pregame_path']}（{obs['obs_pregame_games']} 場）"
+                f"賽前分析：{info['pregame_path']}（{info['pregame_games']} 場）"
             )
             print(
-                "已將「賽前推薦」複製到剪貼簿 → 可直接到 NotebookLM Ctrl+V 貼上資料來源。"
+                "已將「賽前分析」複製到剪貼簿 → 可直接到 NotebookLM Ctrl+V 貼上資料來源。"
             )
-            print("其餘 txt 請在 exports\\ 手動上傳或複製。")
+            print("賽後結果請在 exports\\ 手動上傳或複製。")
             results_log.append(
                 (
                     "NotebookLM匯出",
                     True,
-                    (
-                        f"紀錄{info['results_games']}/{info['focus_games']}場 "
-                        f"盤口{obs['obs_results_games']}/{obs['obs_pregame_games']}場"
-                    ),
+                    f"賽後{info['results_games']}場/賽前{info['pregame_games']}場",
                 )
             )
         except SystemExit as e:
@@ -284,13 +276,11 @@ def main() -> int:
     if all_ok:
         print(
             f"全部步驟完成。紀錄 K1 應為 {results_day}；"
-            f"總表／紀錄 A1 應為 {focus_day}；剪貼簿＝賽前推薦。"
+            f"總表／紀錄 A1 應為 {focus_day}；剪貼簿＝賽前分析。"
         )
         print(
             f"匯出：exports\\{results_day}賽後結果.txt、"
-            f"exports\\{focus_day}賽前推薦.txt、"
-            f"exports\\{results_day}盤口結果（賽後）.txt、"
-            f"exports\\{focus_day}盤口觀察（賽前）.txt"
+            f"exports\\{focus_day}賽前分析.txt"
         )
     else:
         print("有步驟失敗：請依上方 FAILED 項目重跑對應段落。")

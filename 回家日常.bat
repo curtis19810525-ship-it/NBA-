@@ -11,8 +11,9 @@ echo   2. 已關閉 Excel：MLB26-27 / 玖九盤口變化 / 盤口觀察
 echo   3. 本機有安裝桌面版 Excel（步驟會用 COM 重算）
 echo   4. 輸入兩日：賽果日（歸檔）＋ 關注日（總表 A1）
 echo      例 8/11 晚間：賽果日=20260811、關注日=20260812
-echo   5. 結束後 exports\ 會有四份 txt（紀錄＋盤口觀察 賽前/賽後）
-echo      剪貼簿＝賽前推薦，供貼 NotebookLM
+echo   5. 結束後 exports\ 會有兩份整合 txt：
+echo      賽果日賽後結果.txt ＋ 關注日賽前分析.txt
+echo      剪貼簿＝賽前分析，供貼 NotebookLM
 echo.
 python home_pipeline.py
 echo.

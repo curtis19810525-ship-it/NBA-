@@ -6,6 +6,8 @@
   - {關注日}賽前分析.txt ＝ 紀錄（賽前）＋ 盤口觀察（賽前），剪貼簿＝此文
   - {賽果日}賽後結果.txt ＝ 紀錄（賽後）＋ 盤口結果（賽後）
   - 一場兩段：【模型｜紀錄】＋【盤口走勢｜觀察】；以讓分球隊對齊
+  - 精簡格式：開頭僅日期，無長標頭／分隔線（利於 NotebookLM）
+  - 賽前省略空的 H/M/R；賽後才輸出結果欄
   - 不再產出舊四份獨立 txt
 """
 
@@ -104,13 +106,17 @@ def _format_record_block(rec: dict | None, *, postgame: bool) -> list[str]:
     return lines
 
 
-def _format_observation_block(obs: dict | None) -> list[str]:
+def _format_observation_block(
+    obs: dict | None,
+    *,
+    include_results: bool,
+) -> list[str]:
     if not obs:
         return [
             "【盤口走勢｜觀察】",
             "（此場盤口觀察查無資料）",
         ]
-    return [
+    lines = [
         "【盤口走勢｜觀察】",
         f"讓分(頭)：{_fmt_cell(obs.get('sp_head'))}",
         f"讓分(尾)：{_fmt_cell(obs.get('sp_tail'))}",
@@ -123,10 +129,17 @@ def _format_observation_block(obs: dict | None) -> list[str]:
         f"讓2分走勢：{summarize_trend(obs.get('fav2_head'), obs.get('fav2_tail'))}",
         f"受讓2分(頭/尾)：{_fmt_cell(obs.get('rec2_head'))} / {_fmt_cell(obs.get('rec2_tail'))}",
         f"受讓2分走勢：{summarize_trend(obs.get('rec2_head'), obs.get('rec2_tail'))}",
-        f"讓分結果：{_fmt_cell(obs.get('sp_result'))}",
-        f"獨贏結果：{_fmt_cell(obs.get('ml_result'))}",
-        f"2分結果：{_fmt_cell(obs.get('two_result'))}",
     ]
+    # 賽前結果皆空，省略以縮減 NotebookLM 來源量；賽後才輸出 H/M/R
+    if include_results:
+        lines.extend(
+            [
+                f"讓分結果：{_fmt_cell(obs.get('sp_result'))}",
+                f"獨贏結果：{_fmt_cell(obs.get('ml_result'))}",
+                f"2分結果：{_fmt_cell(obs.get('two_result'))}",
+            ]
+        )
+    return lines
 
 
 def format_integrated_text(
@@ -136,24 +149,10 @@ def format_integrated_text(
     kind: str,
     exported_at: datetime | None = None,
 ) -> str:
-    exported_at = exported_at or datetime.now()
+    """精簡格式：開頭僅日期，無長標頭／分隔線（利於 NotebookLM）。"""
+    del exported_at  # 精簡版不輸出匯出時間
     postgame = kind == KIND_POSTGAME_RESULTS
-    title = "賽後整合結果" if postgame else "賽前整合分析"
-    lines = [
-        f"【MLB {title}｜資料來源】",
-        f"類型：{kind}",
-        f"日期：{focus_date}",
-        "來源：MLB26-27數據.xlsx → 紀錄 ＋ 盤口觀察.xlsx → 工作表1",
-        f"匯出時間：{exported_at:%Y-%m-%d %H:%M:%S}",
-        "",
-        "說明：",
-        "- 每場含【模型｜紀錄】與【盤口走勢｜觀察】，以讓分球隊對齊",
-        "- 頭盤＝玖九第1筆快照；尾盤＝開賽前最後快照",
-        "- H/M/R：讓分結果／獨贏結果／2分結果",
-        "- 空值：_",
-        "",
-        "========================================",
-    ]
+    lines = [focus_date]
     if not merged_games:
         lines.append("（此日期查無可合併場次）")
     else:
@@ -161,9 +160,12 @@ def format_integrated_text(
             lines.append(game["game_label"])
             lines.append(f"讓分球隊：{_fmt_empty(game.get('team'))}")
             lines.extend(_format_record_block(game.get("record"), postgame=postgame))
-            lines.extend(_format_observation_block(game.get("observation")))
-            lines.append("")
-    lines.append("========================================")
+            lines.extend(
+                _format_observation_block(
+                    game.get("observation"),
+                    include_results=postgame,
+                )
+            )
     lines.append(f"合計場次：{len(merged_games)}")
     lines.append("")
     return "\n".join(lines)

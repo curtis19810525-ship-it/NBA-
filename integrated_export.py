@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-整合匯出：紀錄 ＋ 盤口觀察 → 每日兩份 NotebookLM 資料來源。
+整合匯出：紀錄 ＋ 盤口觀察 → NotebookLM 資料來源。
 
 定案：
-  - {關注日}賽前分析.txt ＝ 紀錄（賽前）＋ 盤口觀察（賽前），剪貼簿＝此文
-  - {賽果日}賽後結果.txt ＝ 紀錄（賽後）＋ 盤口結果（賽後）
+  - {賽果日}賽後結果.txt（單檔）
+  - {關注日}(1~8)賽前分析.txt ＋ {關注日}(9~N)賽前分析.txt（只產拆檔，不產完整檔）
+  - 剪貼簿＝賽前分析批次 1
   - 一場兩段：【模型｜紀錄】＋【盤口走勢｜觀察】；以讓分球隊對齊
-  - 精簡格式：開頭僅日期，無長標頭／分隔線（利於 NotebookLM）
-  - 賽前省略空的 H/M/R；賽後才輸出結果欄
-  - 不再產出舊四份獨立 txt
+  - 精簡格式；賽前省略空的 H/M/R
 """
 
 from __future__ import annotations
@@ -39,6 +38,7 @@ from observation_export import (
 
 KIND_PREGAME_ANALYSIS = "賽前分析"
 KIND_POSTGAME_RESULTS = "賽後結果"
+PREGAME_BATCH1_SIZE = 8
 
 
 def _team_key(name: str) -> str:
@@ -130,7 +130,6 @@ def _format_observation_block(
         f"受讓2分(頭/尾)：{_fmt_cell(obs.get('rec2_head'))} / {_fmt_cell(obs.get('rec2_tail'))}",
         f"受讓2分走勢：{summarize_trend(obs.get('rec2_head'), obs.get('rec2_tail'))}",
     ]
-    # 賽前結果皆空，省略以縮減 NotebookLM 來源量；賽後才輸出 H/M/R
     if include_results:
         lines.extend(
             [
@@ -148,11 +147,15 @@ def format_integrated_text(
     *,
     kind: str,
     exported_at: datetime | None = None,
+    batch_header: str | None = None,
 ) -> str:
-    """精簡格式：開頭僅日期，無長標頭／分隔線（利於 NotebookLM）。"""
-    del exported_at  # 精簡版不輸出匯出時間
+    """精簡格式：開頭僅日期（可加批次提示），無長標頭／分隔線。"""
+    del exported_at
     postgame = kind == KIND_POSTGAME_RESULTS
-    lines = [focus_date]
+    lines: list[str] = []
+    if batch_header:
+        lines.append(batch_header)
+    lines.append(focus_date)
     if not merged_games:
         lines.append("（此日期查無可合併場次）")
     else:
@@ -169,6 +172,53 @@ def format_integrated_text(
     lines.append(f"合計場次：{len(merged_games)}")
     lines.append("")
     return "\n".join(lines)
+
+
+def pregame_batch_filename(yyyymmdd: str, start: int, end: int) -> str:
+    """例：20260911(1~8)賽前分析.txt"""
+    return f"{yyyymmdd}({start}~{end}){KIND_PREGAME_ANALYSIS}.txt"
+
+
+def split_pregame_batches(
+    merged_games: list[dict],
+    *,
+    batch1_size: int = PREGAME_BATCH1_SIZE,
+) -> list[tuple[int, int, list[dict]]]:
+    """
+    回傳 [(start, end, games), ...]，場次號 1-based。
+    固定前 batch1_size 場為批次 1；其餘為批次 2。
+    總場次 <= batch1_size 時只回一批。
+    """
+    n = len(merged_games)
+    if n == 0:
+        return [(1, 0, [])]
+    if n <= batch1_size:
+        return [(1, n, merged_games)]
+    return [
+        (1, batch1_size, merged_games[:batch1_size]),
+        (batch1_size + 1, n, merged_games[batch1_size:]),
+    ]
+
+
+def _pregame_batch_header(
+    focus_date: str,
+    *,
+    batch_index: int,
+    batch_count: int,
+    start: int,
+    end: int,
+) -> str:
+    if batch_count <= 1:
+        return f"【批次 1/1｜{focus_date}｜第{start}～{end}場】"
+    if batch_index == 1:
+        return (
+            f"【批次 1/{batch_count}｜{focus_date}｜第{start}～{end}場】\n"
+            "請先讀取本批，暫勿給最終推薦。"
+        )
+    return (
+        f"【批次 {batch_index}/{batch_count}｜{focus_date}｜第{start}～{end}場】\n"
+        "請結合上一批內容，開始做正3反3與籌碼分析。"
+    )
 
 
 def _load_record_games(
@@ -212,7 +262,7 @@ def export_integrated_day(
     export_dir: str | None = None,
     copy_to_clipboard: bool = False,
 ) -> tuple[str, int]:
-    """匯出單日整合檔。回傳 (檔案路徑, 場次數)。"""
+    """匯出單日整合檔（賽後結果用）。回傳 (檔案路徑, 場次數)。"""
     export_dir = export_dir or EXPORT_DIR
     os.makedirs(export_dir, exist_ok=True)
 
@@ -231,6 +281,75 @@ def export_integrated_day(
     return out_path, len(merged)
 
 
+def export_pregame_batches(
+    focus_date: str,
+    *,
+    mlb_xlsx: str | None = None,
+    observation_xlsx: str | None = None,
+    export_dir: str | None = None,
+    copy_batch1_to_clipboard: bool = True,
+) -> dict:
+    """
+    賽前分析只產拆檔：
+      YYYYMMDD(1~8)賽前分析.txt
+      YYYYMMDD(9~N)賽前分析.txt（有剩餘場次才產）
+    剪貼簿預設＝批次 1。不產完整 YYYYMMDD賽前分析.txt。
+    """
+    export_dir = export_dir or EXPORT_DIR
+    os.makedirs(export_dir, exist_ok=True)
+
+    record_games = _load_record_games(focus_date, mlb_xlsx=mlb_xlsx)
+    obs_rows = _load_observation_rows(focus_date, observation_xlsx=observation_xlsx)
+    merged = merge_games_by_team(record_games, obs_rows)
+    batches = split_pregame_batches(merged)
+    batch_count = len(batches)
+
+    paths: list[str] = []
+    texts: list[str] = []
+    ranges: list[str] = []
+    for i, (start, end, games) in enumerate(batches, 1):
+        header = _pregame_batch_header(
+            focus_date,
+            batch_index=i,
+            batch_count=batch_count,
+            start=start,
+            end=end if end >= start else 0,
+        )
+        text = format_integrated_text(
+            focus_date,
+            games,
+            kind=KIND_PREGAME_ANALYSIS,
+            batch_header=header,
+        )
+        # 空場次仍寫 1~0 不合理；改成至少標 1~0 僅內部，檔名用 1~0 避免
+        file_start = start if games else 1
+        file_end = end if games else 0
+        if not games:
+            fname = pregame_batch_filename(focus_date, 1, 0)
+        else:
+            fname = pregame_batch_filename(focus_date, file_start, file_end)
+        out_path = os.path.join(export_dir, fname)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        paths.append(out_path)
+        texts.append(text)
+        ranges.append(f"{file_start}~{file_end}" if games else "0")
+
+    if copy_batch1_to_clipboard and texts:
+        copy_text_to_clipboard(texts[0])
+
+    return {
+        "export_dir": os.path.abspath(export_dir),
+        "pregame_paths": paths,
+        "pregame_ranges": ranges,
+        "pregame_games": len(merged),
+        "pregame_batch1_path": paths[0] if paths else "",
+        "pregame_batch2_path": paths[1] if len(paths) > 1 else "",
+        "pregame_path": paths[0] if paths else "",  # 相容：指向批次1
+        "pregame_batch_count": batch_count,
+    }
+
+
 def export_integrated_for_pipeline(
     results_day: str,
     focus_day: str,
@@ -238,7 +357,7 @@ def export_integrated_for_pipeline(
     mlb_xlsx: str | None = None,
     observation_xlsx: str | None = None,
 ) -> dict:
-    """賽果日→賽後結果；關注日→賽前分析（剪貼簿）。"""
+    """賽果日→賽後結果；關注日→賽前分析拆檔（剪貼簿＝批次1）。"""
     results_path, results_n = export_integrated_day(
         results_day,
         kind=KIND_POSTGAME_RESULTS,
@@ -246,21 +365,24 @@ def export_integrated_for_pipeline(
         observation_xlsx=observation_xlsx,
         copy_to_clipboard=False,
     )
-    pregame_path, pregame_n = export_integrated_day(
+    pregame = export_pregame_batches(
         focus_day,
-        kind=KIND_PREGAME_ANALYSIS,
         mlb_xlsx=mlb_xlsx,
         observation_xlsx=observation_xlsx,
-        copy_to_clipboard=True,
+        copy_batch1_to_clipboard=True,
     )
-    export_dir = os.path.dirname(os.path.abspath(pregame_path))
     return {
-        "export_dir": export_dir,
+        "export_dir": pregame["export_dir"],
         "results_path": results_path,
         "results_games": results_n,
-        "pregame_path": pregame_path,
-        "pregame_games": pregame_n,
+        "pregame_path": pregame["pregame_batch1_path"],
+        "pregame_games": pregame["pregame_games"],
+        "pregame_paths": pregame["pregame_paths"],
+        "pregame_ranges": pregame["pregame_ranges"],
+        "pregame_batch1_path": pregame["pregame_batch1_path"],
+        "pregame_batch2_path": pregame["pregame_batch2_path"],
+        "pregame_batch_count": pregame["pregame_batch_count"],
         # 相容舊鍵
-        "focus_path": pregame_path,
-        "focus_games": pregame_n,
+        "focus_path": pregame["pregame_batch1_path"],
+        "focus_games": pregame["pregame_games"],
     }

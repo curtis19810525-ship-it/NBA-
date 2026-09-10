@@ -13,7 +13,7 @@
   4) 爬蟲關注日步驟 1～8
   5) 總表 A1 改為關注日並 Excel COM 重算存檔
   6) 填盤口觀察（關注日：可建頭盤；有比賽結果再填結果欄）
-  7) 匯出整合 txt：{賽果日}賽後結果、{關注日}賽前分析（剪貼簿）
+  7) 匯出整合 txt：{賽果日}賽後結果、{關注日}(1~8)/(9~N)賽前分析（剪貼簿＝批次1）
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def main() -> int:
     print("=" * 60)
     print("流程：補賽果日盤口觀察 → 爬賽果日1～3 → 總表切賽果日並A→K（K1＝賽果日） →")
     print("      爬關注日1～8 → 總表A1改關注日並重算 → 填關注日盤口觀察 →")
-    print("      匯出 exports：賽後結果.txt ＋ 賽前分析.txt（剪貼簿＝賽前分析）")
+    print("      匯出 exports：賽後結果 ＋ 賽前分析(1~8)/(9~N)；剪貼簿＝批次1")
     print()
     print("【重要】執行期間請關閉 Excel（MLB／玖九／盤口觀察）。")
     print("白天手機抓的玖九資料請已同步到本機 OneDrive。")
@@ -229,18 +229,25 @@ def main() -> int:
             print(
                 f"賽後結果：{info['results_path']}（{info['results_games']} 場）"
             )
+            for i, p in enumerate(info.get("pregame_paths") or [], 1):
+                rng = ""
+                ranges = info.get("pregame_ranges") or []
+                if i - 1 < len(ranges):
+                    rng = f"第{ranges[i - 1]}場"
+                print(f"賽前分析批次{i}：{p}" + (f"（{rng}）" if rng else ""))
             print(
-                f"賽前分析：{info['pregame_path']}（{info['pregame_games']} 場）"
+                "已將「賽前分析批次1」複製到剪貼簿 → NotebookLM 先 Ctrl+V 貼批次1。"
             )
-            print(
-                "已將「賽前分析」複製到剪貼簿 → 可直接到 NotebookLM Ctrl+V 貼上資料來源。"
-            )
-            print("賽後結果請在 exports\\ 手動上傳或複製。")
+            if info.get("pregame_batch_count", 1) > 1:
+                print(
+                    "接著開啟批次2 txt 全選複製貼上，並請模型結合兩批做分析。"
+                )
+            print("賽後結果請在 exports 資料夾手動上傳或複製。")
             results_log.append(
                 (
                     "NotebookLM匯出",
                     True,
-                    f"賽後{info['results_games']}場/賽前{info['pregame_games']}場",
+                    f"賽後{info['results_games']}場/賽前{info['pregame_games']}場×{info.get('pregame_batch_count', 1)}批",
                 )
             )
         except SystemExit as e:
@@ -276,11 +283,12 @@ def main() -> int:
     if all_ok:
         print(
             f"全部步驟完成。紀錄 K1 應為 {results_day}；"
-            f"總表／紀錄 A1 應為 {focus_day}；剪貼簿＝賽前分析。"
+            f"總表／紀錄 A1 應為 {focus_day}；剪貼簿＝賽前分析批次1。"
         )
         print(
             f"匯出：exports\\{results_day}賽後結果.txt、"
-            f"exports\\{focus_day}賽前分析.txt"
+            f"exports\\{focus_day}(1~8)賽前分析.txt"
+            f"（場次多時另有 (9~N) 批次2）"
         )
     else:
         print("有步驟失敗：請依上方 FAILED 項目重跑對應段落。")

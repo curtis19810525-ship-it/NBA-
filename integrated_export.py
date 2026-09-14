@@ -217,7 +217,8 @@ def _pregame_batch_header(
         )
     return (
         f"【批次 {batch_index}/{batch_count}｜{focus_date}｜第{start}～{end}場】\n"
-        "請結合上一批內容，開始做正3反3與籌碼分析。"
+        "100% 嚴格執行「四大指標 ＋ 六大操盤模式」的雙重過濾模型，"
+        "徹底貫徹「寧缺勿濫」的最高操盤紀律！"
     )
 
 

@@ -387,3 +387,45 @@ def export_integrated_for_pipeline(
         "focus_path": pregame["pregame_batch1_path"],
         "focus_games": pregame["pregame_games"],
     }
+
+
+def main() -> int:
+    """命令列：只匯出，不跑爬蟲。用法：python integrated_export.py 賽果日 關注日"""
+    import sys
+
+    from fill_observation import ensure_excel_files_closed, prompt_date
+    from fill_observation import parse_yyyymmdd  # noqa: F401
+
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+
+    args = [a for a in sys.argv[1:] if a.strip()]
+    if len(args) >= 2:
+        results_day, focus_day = args[0].strip(), args[1].strip()
+    else:
+        print("只匯出 NotebookLM 整合檔（不爬蟲、不重算）")
+        results_day = prompt_date("請輸入賽果日 (YYYYMMDD): ")
+        focus_day = prompt_date("請輸入關注日 (YYYYMMDD): ")
+
+    ensure_excel_files_closed(
+        [MLB_XLSX_FILE, OBSERVATION_XLSX_FILE]
+    )
+    info = export_integrated_for_pipeline(
+        results_day,
+        focus_day,
+        mlb_xlsx=MLB_XLSX_FILE,
+        observation_xlsx=OBSERVATION_XLSX_FILE,
+    )
+    print(f"檔案目錄：{info['export_dir']}")
+    print(f"賽後結果：{info['results_path']}（{info['results_games']} 場）")
+    for i, path in enumerate(info.get("pregame_paths") or [], 1):
+        print(f"賽前分析批次{i}：{path}")
+    print("剪貼簿＝賽前分析批次1")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

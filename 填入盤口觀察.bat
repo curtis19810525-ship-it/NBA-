@@ -11,6 +11,7 @@ echo   - 玖九盤口變化.xlsx
 echo   - 盤口觀察.xlsx
 echo 本程式讀的是磁碟已存檔內容，未存檔會讀到舊資料。
 echo 場次來源：玖九「比賽結果」；金流／量化有「紀錄」才補。
+echo 本程式不爬盤口。若頭尾空白，請先跑「診斷玖九盤口來源.bat」。
 echo.
 python fill_observation.py
 echo.

@@ -637,6 +637,21 @@ def extend_table_and_format(ws, table, orig_bounds, date_fmt: str) -> int | None
     return final_last
 
 
+def report_jiujiu_source_health(snapshots: list, results: list) -> None:
+    """讀檔後立刻區分：賽果有／盤口快照無（手機盤口捷徑失敗的典型症狀）。"""
+    print(f"玖九比賽結果：{len(results)} 列；MLB快照：{len(snapshots)} 列")
+    if results and not snapshots:
+        print()
+        print("[警告] 有比賽結果、但 MLB快照是空的 → 盤口頭尾會空白。")
+        print("       本腳本只讀 Excel，不會爬盤口。")
+        print("       請查 sibling「抓取玖九盤口動態資訊」或手機 VPS 盤口捷徑；")
+        print("       也可先跑「診斷玖九盤口來源.bat」。")
+        print()
+    elif not results and not snapshots:
+        print("[警告] 玖九兩分頁都沒資料，請確認存檔／OneDrive 同步。")
+    print()
+
+
 def build(start: datetime, end: datetime) -> None:
     for p in (JIUJIU_XLSX_FILE, OBSERVATION_XLSX_FILE):
         if not os.path.exists(p):
@@ -648,6 +663,7 @@ def build(start: datetime, end: datetime) -> None:
     print(f"日期範圍：{start:%Y/%m/%d} ~ {end:%Y/%m/%d}")
     print(f"目標檔：{OBSERVATION_XLSX_FILE}")
     print("場次來源：玖九「比賽結果」；金流／量化：紀錄有則補、無則留空")
+    print("（本程式不爬盤口；盤口來源為 sibling／VPS 寫入的「玖九盤口變化.xlsx」）")
     print()
     print("【重要】Excel 只顯示記憶體內容；本程式讀的是「已存檔」的磁碟檔。")
     print("請先在 Excel 對 MLB／玖九／盤口觀察按「存檔」並關閉，再繼續。")
@@ -679,6 +695,7 @@ def build(start: datetime, end: datetime) -> None:
     snapshots = read_snapshot_rows(jj_wb)
     results = read_result_rows(jj_wb)
     jj_wb.close()
+    report_jiujiu_source_health(snapshots, results)
     if not results:
         raise SystemExit("玖九「比賽結果」沒有資料，無法建立場次。")
 
@@ -707,6 +724,7 @@ def build(start: datetime, end: datetime) -> None:
     record_filled = 0
     no_jiujiu_dates: list[str] = []
     skipped_no_fav = 0
+    no_snapshot_games = 0
 
     for focus_date in daterange(start, end):
         day_results = results_for_date(results, focus_date)
@@ -760,6 +778,10 @@ def build(start: datetime, end: datetime) -> None:
                 )
                 if snaps:
                     head, tail = pick_head_tail(snaps, fav_is_home)
+                else:
+                    no_snapshot_games += 1
+            else:
+                no_snapshot_games += 1
 
             res = translate_results(result, fav_is_home, unknowns)
             rec = record_map.get(fav_nick)
@@ -839,6 +861,7 @@ def build(start: datetime, end: datetime) -> None:
             filled_cells,
             tail_updates,
             record_filled=record_filled,
+            no_snapshot_games=no_snapshot_games,
         )
         return
 
@@ -860,6 +883,7 @@ def build(start: datetime, end: datetime) -> None:
         filled_cells,
         tail_updates,
         record_filled=record_filled,
+        no_snapshot_games=no_snapshot_games,
     )
 
 
@@ -871,6 +895,7 @@ def _report(
     filled_cells,
     tail_updates=0,
     record_filled=0,
+    no_snapshot_games=0,
 ) -> None:
     print()
     print("-" * 60)
@@ -879,6 +904,11 @@ def _report(
         + (f"　尾欄更新：{tail_updates}" if tail_updates else "")
         + (f"　紀錄補金流／量化：{record_filled}" if record_filled else "")
     )
+    if no_snapshot_games:
+        print(
+            f"[注意] 無開賽前 MLB快照（頭尾盤口空白）：{no_snapshot_games} 場"
+            " → 查盤口爬蟲／診斷玖九盤口來源.bat，非本腳本可修"
+        )
     if no_source_dates:
         print(f"玖九比賽結果查無資料的日期：{', '.join(no_source_dates)}")
     if unknowns:

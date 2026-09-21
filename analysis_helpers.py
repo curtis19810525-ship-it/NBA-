@@ -23,8 +23,23 @@ _JIUJIU_DIR = os.path.normpath(
 if _JIUJIU_DIR not in sys.path:
     sys.path.insert(0, _JIUJIU_DIR)
 
-from mlb_filter import parse_start_time, resolve_mlb_team, team_nickname  # noqa: E402
-from odds_format import format_game_fields_for_timeline, format_odds, format_timeline_handicap_cell  # noqa: E402
+try:
+    from mlb_filter import parse_start_time, resolve_mlb_team, team_nickname  # noqa: E402
+    from odds_format import (  # noqa: E402
+        format_game_fields_for_timeline,
+        format_odds,
+        format_timeline_handicap_cell,
+    )
+except ImportError as _jiujiu_imp_err:
+    raise SystemExit(
+        "找不到 sibling 專案「抓取玖九盤口動態資訊」的 mlb_filter／odds_format。\n"
+        f"預期路徑：{_JIUJIU_DIR}\n"
+        f"目錄存在：{'是' if os.path.isdir(_JIUJIU_DIR) else '否'}\n"
+        "說明：本 repo 的 fill_observation.py 只讀「玖九盤口變化.xlsx」，"
+        "不負責盤口爬取；爬蟲在 sibling 或手機 VPS（例如 108.61.247.23）。\n"
+        "請在本機把 sibling 放在上一層資料夾，或執行「診斷玖九盤口來源.bat」檢查 Excel。\n"
+        f"原始錯誤：{_jiujiu_imp_err}"
+    ) from _jiujiu_imp_err
 
 SNAPSHOT_COLS = [
     "抓取時間",

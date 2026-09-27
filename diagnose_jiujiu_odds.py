@@ -1,23 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-診斷玖九盤口資料來源（非爬蟲）
+診斷玖九盤口／賽果資料來源（非爬蟲）
 
-本 repo（抓取 MLB 網路資料）的 fill_observation.py 只「讀」
+本 repo 的 fill_observation.py 只「讀」
   C:\\Users\\curti\\OneDrive\\MLB26\\玖九盤口變化.xlsx
-的「比賽結果」「MLB快照」，再填入盤口觀察.xlsx。
+的「比賽結果」「MLB快照」。
 
-真正把網頁盤口寫進「玖九盤口變化.xlsx」的程式在 sibling：
-  ..\\抓取玖九盤口動態資訊
-（本 GitHub repo 沒有這份程式；手機捷徑多半打 VPS，例如 108.61.247.23）
+真正寫入該檔的程式在 sibling「抓取玖九盤口動態資訊」或手機 VPS
+（例如 http://108.61.247.23/…）。捷徑畫面顯示「成功」≠ 指定日一定有新列。
 
-本腳本只檢查本機 Excel 裡賽果／快照是否齊全，用來對照：
-  - 賽果捷徑成功、盤口捷徑失敗 → 通常「比賽結果」有資料、「MLB快照」缺或過舊
+常見症狀：
+  - 網站 ti9999 賽果日有資料，但「比賽結果」最後一列停在前一天
+  - 「執行紀錄」有跑過，但新增列數為 0 或查詢日不對
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from collections import Counter
 from datetime import datetime
@@ -29,6 +30,9 @@ from config import JIUJIU_XLSX_FILE
 SIBLING_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "抓取玖九盤口動態資訊")
 )
+
+# 玖九開賽時間常見：09-27 07:10（無年份）
+_MMDD_RE = re.compile(r"(?<!\d)(\d{1,2})[-/](\d{1,2})(?!\d)")
 
 
 def _cell_str(v) -> str:
@@ -54,37 +58,83 @@ def _parse_ts(s: str) -> datetime | None:
     return None
 
 
-def _kickoff_date_key(v) -> str:
-    """開賽時間欄 → YYYYMMDD（能辨就辨，否則空）。"""
+def _kickoff_mmdd(v) -> str:
+    """開賽時間 → MM-DD（玖九常用無年份格式）。"""
+    if isinstance(v, datetime):
+        return v.strftime("%m-%d")
+    s = _cell_str(v)
+    if not s:
+        return ""
+    m = _MMDD_RE.search(s)
+    if m:
+        return f"{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    return ""
+
+
+def _kickoff_date_key(v, *, default_year: int | None = None) -> str:
+    """開賽時間 → YYYYMMDD；無年份時用 default_year 補上。"""
     if isinstance(v, datetime):
         return v.strftime("%Y%m%d")
     s = _cell_str(v)
     if not s:
         return ""
-    digits = "".join(ch for ch in s if ch.isdigit())
-    if len(digits) >= 8:
-        return digits[:8]
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"):
+    # 完整日期優先
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
         try:
-            return datetime.strptime(s[:10], fmt).strftime("%Y%m%d")
+            chunk = s[:10] if fmt != "%Y%m%d" else "".join(ch for ch in s if ch.isdigit())[:8]
+            return datetime.strptime(chunk, fmt).strftime("%Y%m%d")
         except ValueError:
             continue
+    mmdd = _kickoff_mmdd(s)
+    if mmdd and default_year:
+        return f"{default_year}{mmdd[:2]}{mmdd[3:5]}"
     return ""
+
+
+def _yyyymmdd_to_mmdd(d: str) -> str:
+    return f"{d[4:6]}-{d[6:8]}"
 
 
 def print_architecture() -> None:
     print("=" * 60)
-    print("玖九盤口資料流（檢查結論用）")
+    print("玖九賽果／盤口資料流（檢查結論用）")
     print("=" * 60)
-    print("1. 盤口爬蟲（寫入 Excel）")
+    print("1. 寫入端（爬蟲）")
     print(f"   預期本機 sibling：{SIBLING_DIR}")
     print(f"   目錄存在：{'是' if os.path.isdir(SIBLING_DIR) else '否（本機／此雲端環境都沒有）'}")
-    print("   手機捷徑若打 http://108.61.247.23/... → 爬蟲在 VPS，不在本 repo")
+    print("   手機「玖九補賽果／盤口」→ 多半是 http://108.61.247.23/…（VPS）")
     print()
     print("2. 本 repo 消費端（只讀、不爬）")
-    print("   fill_observation.py → 讀「比賽結果」建場次、讀「MLB快照」填頭尾盤口")
+    print("   fill_observation.py → 讀「比賽結果」「MLB快照」")
     print(f"   玖九檔：{JIUJIU_XLSX_FILE}")
     print("=" * 60)
+    print()
+
+
+def _dump_run_log(wb) -> None:
+    """若有「執行紀錄」分頁，印出最後幾列（對照捷徑成功但沒寫入）。"""
+    name = None
+    for cand in ("執行紀錄", "執行記錄", "RunLog", "log"):
+        if cand in wb.sheetnames:
+            name = cand
+            break
+    if not name:
+        print("執行紀錄：無此分頁（無法從 Excel 對照捷徑寫入筆數）")
+        return
+
+    ws = wb[name]
+    rows: list[tuple] = []
+    for row in ws.iter_rows(min_row=1, values_only=True):
+        if not row or all(v is None or str(v).strip() == "" for v in row):
+            continue
+        rows.append(tuple(_cell_str(v) for v in row[:8]))
+    print(f"執行紀錄（分頁「{name}」）最近 {min(12, len(rows))} 列：")
+    if not rows:
+        print("  （空白）")
+        return
+    for row in rows[-12:]:
+        line = " | ".join(c for c in row if c)
+        print(f"  {line}")
     print()
 
 
@@ -101,9 +151,16 @@ def diagnose(path: str, focus_start: str | None = None, focus_end: str | None = 
     print(f"檔案修改時間：{mtime:%Y-%m-%d %H:%M:%S}")
     print()
 
+    # 無年份的 MM-DD 用檔案年或指定區間年推斷
+    default_year = mtime.year
+    if focus_start:
+        default_year = int(focus_start[:4])
+
     wb = load_workbook(path, read_only=True, data_only=True)
     sheets = list(wb.sheetnames)
     print(f"分頁：{', '.join(sheets)}")
+    print()
+    _dump_run_log(wb)
 
     has_results = "比賽結果" in wb.sheetnames
     has_snaps = "MLB快照" in wb.sheetnames
@@ -114,24 +171,36 @@ def diagnose(path: str, focus_start: str | None = None, focus_end: str | None = 
 
     result_n = 0
     result_dates: Counter[str] = Counter()
+    result_mmdd: Counter[str] = Counter()
+    last_kickoffs: list[str] = []
     if has_results:
         ws = wb["比賽結果"]
         for row in ws.iter_rows(min_row=2, values_only=True):
             if not row or not row[0]:
                 continue
             result_n += 1
-            key = _kickoff_date_key(row[0])
+            raw = row[0]
+            key = _kickoff_date_key(raw, default_year=default_year)
+            mmdd = _kickoff_mmdd(raw)
             if key:
                 result_dates[key] += 1
+            if mmdd:
+                result_mmdd[mmdd] += 1
+            last_kickoffs.append(_cell_str(raw))
         print(f"比賽結果：{result_n} 列")
-        if result_dates:
-            top = ", ".join(f"{d}×{n}" for d, n in sorted(result_dates.items())[-5:])
-            print(f"  最近有資料的開賽日（最多列 5 天）：{top}")
+        if result_mmdd:
+            top = ", ".join(f"{d}×{n}" for d, n in sorted(result_mmdd.items())[-8:])
+            print(f"  最近有資料的開賽日 MM-DD：{top}")
+        if last_kickoffs:
+            print("  最後 8 筆開賽時間（原始值）：")
+            for s in last_kickoffs[-8:]:
+                print(f"    {s}")
 
     snap_n = 0
     latest_ts: datetime | None = None
     latest_raw = ""
     snap_dates: Counter[str] = Counter()
+    snap_mmdd: Counter[str] = Counter()
     if has_snaps:
         ws = wb["MLB快照"]
         for row in ws.iter_rows(min_row=2, values_only=True):
@@ -142,35 +211,43 @@ def diagnose(path: str, focus_start: str | None = None, focus_end: str | None = 
             if ts and (latest_ts is None or ts > latest_ts):
                 latest_ts = ts
                 latest_raw = _cell_str(row[0])
-            # 開賽時間通常在第 4 欄（0-index 3），與 SNAPSHOT_COLS 對齊
             if len(row) > 3:
-                key = _kickoff_date_key(row[3])
+                key = _kickoff_date_key(row[3], default_year=default_year)
+                mmdd = _kickoff_mmdd(row[3])
                 if key:
                     snap_dates[key] += 1
+                if mmdd:
+                    snap_mmdd[mmdd] += 1
         print(f"MLB快照：{snap_n} 列")
         if latest_ts:
             print(f"  最新抓取時間：{latest_raw}")
         else:
             print("  最新抓取時間：無法解析（或沒有資料）")
-        if snap_dates:
-            top = ", ".join(f"{d}×{n}" for d, n in sorted(snap_dates.items())[-5:])
-            print(f"  最近有快照的開賽日（最多列 5 天）：{top}")
+        if snap_mmdd:
+            top = ", ".join(f"{d}×{n}" for d, n in sorted(snap_mmdd.items())[-8:])
+            print(f"  最近有快照的開賽日 MM-DD：{top}")
 
     wb.close()
     print()
 
-    # 區間對照（可選）
+    missing_r: list[str] = []
+    missing_s: list[str] = []
     if focus_start and focus_end:
         print(f"指定區間 {focus_start}～{focus_end}：")
         cur = datetime.strptime(focus_start, "%Y%m%d")
         end = datetime.strptime(focus_end, "%Y%m%d")
-        missing_r: list[str] = []
-        missing_s: list[str] = []
         while cur <= end:
             d = cur.strftime("%Y%m%d")
-            if result_dates.get(d, 0) == 0:
+            mmdd = _yyyymmdd_to_mmdd(d)
+            # 同時用 YYYYMMDD 與 MM-DD 對（Excel 常無年份）
+            has_r = result_dates.get(d, 0) > 0 or result_mmdd.get(mmdd, 0) > 0
+            has_s = snap_dates.get(d, 0) > 0 or snap_mmdd.get(mmdd, 0) > 0
+            n_r = result_dates.get(d, 0) or result_mmdd.get(mmdd, 0)
+            n_s = snap_dates.get(d, 0) or snap_mmdd.get(mmdd, 0)
+            print(f"  {d}（{mmdd}）：比賽結果 {n_r} 列，MLB快照 {n_s} 列")
+            if not has_r:
                 missing_r.append(d)
-            if snap_dates.get(d, 0) == 0:
+            if not has_s:
                 missing_s.append(d)
             cur = cur.fromordinal(cur.toordinal() + 1)
         print(f"  缺比賽結果的日：{', '.join(missing_r) if missing_r else '無'}")
@@ -179,20 +256,27 @@ def diagnose(path: str, focus_start: str | None = None, focus_end: str | None = 
 
     # 判讀
     print("-" * 60)
-    if result_n > 0 and snap_n == 0:
-        print("判讀：賽果有、盤口快照空 → 與「手機賽果可、盤口不可」一致。")
-        print("原因在盤口爬蟲／VPS（或 sibling 抓取玖九盤口動態資訊），不是 fill_observation.py。")
-        print("請在 VPS 或 sibling 專案查盤口捷徑失敗 log；本 repo 無法重現 108.61.247.23。")
+    if missing_r:
+        print("判讀：捷徑／網站可能有該日賽果，但 Excel「比賽結果」沒有對應開賽日。")
+        print(f"  缺日：{', '.join(missing_r)}")
+        if last_kickoffs:
+            print(f"  表尾停在：{last_kickoffs[-1]}")
+        print("原因在 VPS「玖九補賽果」寫入端（成功畫面仍可能 0 筆新增），不是 fill_observation。")
+        print("請查 Excel「執行紀錄」該次的查詢日／寫入筆數；並在 VPS 確認是否帶對賽果日。")
+        print("本 GitHub repo 沒有 VPS 爬蟲原始碼，無法在此直接修寫入。")
+        code = 1
+    elif result_n > 0 and snap_n == 0:
+        print("判讀：賽果有、盤口快照空 → 盤口捷徑／VPS 問題。")
         code = 1
     elif result_n > 0 and snap_n > 0:
         print("判讀：賽果與快照都有資料。若盤口觀察頭尾仍空，再查配對（隊名／開賽時間）。")
-        print("fill_observation.py 只負責填表；不會對網頁發盤口請求。")
+        print("fill_observation.py 只負責填表；不會對網頁發盤口／賽果請求。")
         code = 0
     elif result_n == 0 and snap_n == 0:
         print("判讀：玖九檔兩分頁都空／讀不到 → 先確認存檔與 OneDrive 同步。")
         code = 2
     else:
-        print("判讀：快照有、比賽結果空 → 場次來源會失敗（PR #3 起場次靠比賽結果）。")
+        print("判讀：快照有、比賽結果空 → 場次來源會失敗（場次靠比賽結果）。")
         code = 1
     print("-" * 60)
     return code
@@ -204,11 +288,11 @@ def main() -> None:
             stream.reconfigure(encoding="utf-8")
         except (AttributeError, ValueError):
             pass
-    parser = argparse.ArgumentParser(description="診斷玖九盤口 Excel 資料來源")
+    parser = argparse.ArgumentParser(description="診斷玖九賽果／盤口 Excel 資料來源")
     parser.add_argument(
         "start_date",
         nargs="?",
-        help="可選：開始日 YYYYMMDD，對照區間缺資料",
+        help="可選：開始日 YYYYMMDD（例：20260927）",
     )
     parser.add_argument(
         "end_date",

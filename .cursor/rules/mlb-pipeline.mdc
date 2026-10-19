@@ -1,0 +1,36 @@
+---
+description: MLB／玖九管線跨裝置共同規則（手機 Cloud Agent 與電腦 Cursor 共用）
+alwaysApply: true
+---
+
+# MLB 管線規則
+
+## 回覆與安全
+- 一律使用繁體中文回覆。
+- 改現有檔案前先 git commit 或複製到「回朔點備分」。
+- 動 Excel 前必須提醒：先關閉 OneDrive 上相關 xlsx。
+
+## 責任邊界
+- 本 repo（抓取 MLB 網路資料／NBA-）負責：Playsport／ESPN 爬蟲、盤口觀察填入、回家日常、NotebookLM 匯出。
+- 玖九手機補賽果／抓盤口在 sibling「抓取玖九盤口動態資訊」或 VPS `/opt/jiujiu-scraper`（108.61.247.23），不在本 repo。
+- Cursor 管線；NotebookLM 分析。不要把分析邏輯硬塞進程式。
+
+## 路徑（Windows 本機）
+- MLB：`C:\Users\curti\OneDrive\MLB26\MLB26-27數據.xlsx`
+- 玖九：`C:\Users\curti\OneDrive\MLB26\玖九盤口變化.xlsx`
+- 盤口觀察：`C:\Users\curti\OneDrive\MLB26\盤口觀察.xlsx`
+- 分析母版：`C:\Users\curti\OneDrive\MLB26\MLB26-分析母版.xlsx`
+
+## 日期語意
+- 賽果日 ≠ 關注日；總表 A1 = 關注日。
+- 回家日常／匯出時勿搞混。
+
+## 玖九補賽果（若使用者問到）
+- 選單：抓盤口 → `/run`；補賽果 → `/run-results`。
+- 成功頁應為「玖九賽果結果」＋待補／寫入；若出現「玖九盤口結果」代表跑到盤口或狀態檔仍是舊盤口。
+- 待補 = 有 MLB快照、尚無比賽結果、且開賽+4小時已過。
+- 整表重算 `rebuild_all_results_from_snapshots` 極慢；VPS 上宜略過二次整表重算。
+
+## 跨裝置
+- 重要定案寫入 repo 根目錄 `跨裝置備忘.md` 並 git push，手機與電腦才能共用。
+- 不要假設能讀到對方裝置的本機聊天紀錄。
